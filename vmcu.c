@@ -16,24 +16,28 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+// FIXME: Compare HAL with struct rtc_time
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/i2c.h>
 #include <linux/regmap.h>
+#include <linux/i2c.h>
+#include <linux/rtc.h>
+#include <linux/bcd.h>
 
 #define MAGIC_REG_OFFSET		0x0
 #define MAGIC_REG_VALUE			0x0ec70add
 #define VERSION_REG_OFFSET		0x1
 #define RTC_TIME_REG_OFFSET		0x2
-#define RTC_TIME_HOUR_OFFSET	0x0
-#define RTC_TIME_MIN_OFFSET		0x1
-#define RTC_TIME_SEC_OFFSET		0x2
+#define RTC_TIME_HOUR_SHIFT		0
+#define RTC_TIME_MIN_SHIFT		8
+#define RTC_TIME_SEC_SHIFT		16
 #define RTC_DATE_REG_OFFSET		0x3
-#define RTC_DATE_YEAR_OFFSET	0x0
-#define RTC_DATE_MONTH_OFFSET	0x1
-#define RTC_DATE_DAT_OFFSET		0x2
-#define RTC_DATE_WDAY_OFFSET	0x3
+#define RTC_DATE_YEAR_SHIFT		0
+#define RTC_DATE_MONTH_SHIFT	8
+#define RTC_DATE_DAY_SHIFT		16
+#define RTC_DATE_WDAY_SHIFT		24
 
 static const struct regmap_config vmcu_regmap_config = {
 	.reg_bits = 8,
@@ -42,9 +46,68 @@ static const struct regmap_config vmcu_regmap_config = {
 };
 
 struct vmcu {
-	struct i2c_client		*client;
 	struct regmap			*regmap;
+	struct i2c_client		*client;
+	struct rtc_device 		*rtc;
 };
+
+static int rtc_set(struct device *dev, struct rtc_time *rtctime)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	uint32_t val = 0;
+	int r = 0;
+
+	val = bin2bcd(rtctime->tm_year) << RTC_DATE_YEAR_SHIFT | bin2bcd(rtctime->tm_mon) << RTC_DATE_MONTH_SHIFT
+			| bin2bcd(rtctime->tm_mday) << RTC_DATE_DAY_SHIFT | bin2bcd(rtctime->tm_wday) << RTC_DATE_WDAY_SHIFT;
+	r = regmap_write(vmcu->regmap, RTC_DATE_REG_OFFSET, val);
+	if (r < 0)
+		return r;
+	val = bin2bcd(rtctime->tm_hour) << RTC_TIME_HOUR_SHIFT | bin2bcd(rtctime->tm_min) << RTC_TIME_MIN_SHIFT
+			| bin2bcd(rtctime->tm_sec) << RTC_TIME_SEC_SHIFT;
+	r = regmap_write(vmcu->regmap, RTC_TIME_REG_OFFSET, val);
+	if (r < 0)
+		return r;
+
+	dev_err(dev, "RTC set to %02d.%02d.%02d %02d:%02d:%02d\n", rtctime->tm_mday,
+		rtctime->tm_mon, rtctime->tm_year, rtctime->tm_hour,
+		rtctime->tm_min, rtctime->tm_sec);
+
+	return 0;
+}
+
+static int rtc_read(struct device *dev, struct rtc_time *rtctime)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	uint32_t val = 0;
+	int r = 0;
+
+	r = regmap_read(vmcu->regmap, RTC_TIME_REG_OFFSET, &val);
+	if (r < 0)
+		return r;
+	rtctime->tm_sec = bcd2bin(val >> RTC_TIME_SEC_SHIFT & 0xff);
+	rtctime->tm_min = bcd2bin(val >> RTC_TIME_MIN_SHIFT & 0xff);
+	rtctime->tm_hour = bcd2bin(val >> RTC_TIME_HOUR_SHIFT & 0xff);
+
+	r = regmap_read(vmcu->regmap, RTC_DATE_REG_OFFSET, &val);
+	if (r < 0)
+		return r;
+	rtctime->tm_mday = bcd2bin(val >> RTC_DATE_DAY_SHIFT);
+	rtctime->tm_mon = bcd2bin(val >> RTC_DATE_MONTH_SHIFT);
+	rtctime->tm_year = bcd2bin(val >> RTC_DATE_YEAR_SHIFT);
+	rtctime->tm_wday = bcd2bin(val >> RTC_DATE_WDAY_SHIFT);
+	rtctime->tm_yday = 0;
+	rtctime->tm_isdst = 0;
+
+	dev_err(dev, "RTC time read: %02d.%02d.%02d : %02d.%02d.%02d, wd=%d\n",
+		(rtctime->tm_hour), (rtctime->tm_min), (rtctime->tm_sec),
+		(rtctime->tm_mday), (rtctime->tm_mon), (rtctime->tm_year),
+		rtctime->tm_wday);
+
+	return 0;
+}
+
+static struct rtc_class_ops vmcu_rtc_ops = {
+	.read_time = rtc_read, .set_time = rtc_set, };
 
 static int probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
@@ -77,6 +140,11 @@ static int probe(struct i2c_client *client, const struct i2c_device_id *id)
 	if (r < 0)
 		return r;
 	dev_info(&client->dev, "Version: %u.%u.%u\n", val >> 16 & 0xff, val >> 8 & 0xff, val & 0xff);
+
+	// rtc
+	vmcu->rtc = devm_rtc_device_register(&client->dev, "vmcu", &vmcu_rtc_ops, THIS_MODULE);
+	if (IS_ERR(vmcu->rtc))
+		return PTR_ERR(vmcu->rtc);
 
 	return 0;
 }
