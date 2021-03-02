@@ -22,9 +22,23 @@
 #include <linux/i2c.h>
 #include <linux/regmap.h>
 
+#define MAGIC_REG_OFFSET		0x0
+#define MAGIC_REG_VALUE			0x0ec70add
+#define VERSION_REG_OFFSET		0x1
+#define RTC_TIME_REG_OFFSET		0x2
+#define RTC_TIME_HOUR_OFFSET	0x0
+#define RTC_TIME_MIN_OFFSET		0x1
+#define RTC_TIME_SEC_OFFSET		0x2
+#define RTC_DATE_REG_OFFSET		0x3
+#define RTC_DATE_YEAR_OFFSET	0x0
+#define RTC_DATE_MONTH_OFFSET	0x1
+#define RTC_DATE_DAT_OFFSET		0x2
+#define RTC_DATE_WDAY_OFFSET	0x3
+
 static const struct regmap_config vmcu_regmap_config = {
 	.reg_bits = 8,
-	.val_bits = 8,
+	.val_bits = 32,
+	.val_format_endian = REGMAP_ENDIAN_LITTLE,
 };
 
 struct vmcu {
@@ -35,10 +49,8 @@ struct vmcu {
 static int probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct vmcu *vmcu = NULL;
-	uint reg = 0;
+	u32 val = 0;
 	int r = 0;
-
-	dev_err(&client->dev, "We're here: %s\n", __func__);
 
 	vmcu = devm_kzalloc(&client->dev, sizeof(struct vmcu), GFP_KERNEL);
 	if (!vmcu) {
@@ -47,18 +59,24 @@ static int probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	vmcu->client = client;
 	vmcu->regmap = devm_regmap_init_i2c(client, &vmcu_regmap_config);
-	if (IS_ERR(vmcu->regmap)) {
-		dev_err(&client->dev, "Failed to initialize regmap\n");
+	if (IS_ERR(vmcu->regmap))
 		return -EINVAL;
-	}
 	i2c_set_clientdata(client, vmcu);
 
-	r = regmap_read(vmcu->regmap, 0x00, &reg);
-	if (r < 0) {
-		dev_err(&client->dev, "Failed reading regmap: %d\n", r);
+	// check magic number
+	r = regmap_read(vmcu->regmap, MAGIC_REG_OFFSET, &val);
+	if (r < 0)
 		return r;
+	if (val != MAGIC_REG_VALUE) {
+		dev_err(&client->dev, "Wrong magic number 0x%x\n", val);
+		return -EINVAL;
 	}
-	dev_err(&client->dev, "Reg 0x00: %x\n", reg);
+
+	// check version
+	r = regmap_read(vmcu->regmap, VERSION_REG_OFFSET, &val);
+	if (r < 0)
+		return r;
+	dev_info(&client->dev, "Version: %u.%u.%u\n", val >> 16 & 0xff, val >> 8 & 0xff, val & 0xff);
 
 	return 0;
 }
