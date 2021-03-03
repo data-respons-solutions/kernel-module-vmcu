@@ -16,11 +16,10 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-// FIXME: Compare HAL with struct rtc_time
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/i2c.h>
 #include <linux/rtc.h>
@@ -56,6 +55,7 @@ static const struct regmap_config vmcu_regmap_config = {
 };
 
 struct vmcu {
+	struct mutex			mtx;
 	struct regmap			*regmap;
 	struct i2c_client		*client;
 	struct rtc_device 		*rtc;
@@ -64,17 +64,27 @@ struct vmcu {
 static int rtc_set(struct device *dev, struct rtc_time *rtctime)
 {
 	struct vmcu *vmcu = dev_get_drvdata(dev);
-	uint32_t val = 0;
 	int r = 0;
 
-	val = bin2bcd(rtctime->tm_year - 100) << RTC_DATE_YEAR_SHIFT | bin2bcd(rtctime->tm_mon + 1) << RTC_DATE_MONTH_SHIFT
-			| bin2bcd(rtctime->tm_mday) << RTC_DATE_DAY_SHIFT | bin2bcd(rtctime->tm_wday + 1) << RTC_DATE_WDAY_SHIFT;
-	r = regmap_write(vmcu->regmap, RTC_DATE_REG_OFFSET, val);
-	if (r < 0)
-		return r;
-	val = bin2bcd(rtctime->tm_hour) << RTC_TIME_HOUR_SHIFT | bin2bcd(rtctime->tm_min) << RTC_TIME_MIN_SHIFT
+	uint32_t date = bin2bcd(rtctime->tm_year - 100) << RTC_DATE_YEAR_SHIFT
+			| bin2bcd(rtctime->tm_mon + 1) << RTC_DATE_MONTH_SHIFT
+			| bin2bcd(rtctime->tm_mday) << RTC_DATE_DAY_SHIFT
+			| bin2bcd(rtctime->tm_wday + 1) << RTC_DATE_WDAY_SHIFT;
+
+	uint32_t time = bin2bcd(rtctime->tm_hour) << RTC_TIME_HOUR_SHIFT
+			| bin2bcd(rtctime->tm_min) << RTC_TIME_MIN_SHIFT
 			| bin2bcd(rtctime->tm_sec) << RTC_TIME_SEC_SHIFT;
-	r = regmap_write(vmcu->regmap, RTC_TIME_REG_OFFSET, val);
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	r = regmap_write(vmcu->regmap, RTC_DATE_REG_OFFSET, date);
+	if (r == 0)
+		r = regmap_write(vmcu->regmap, RTC_TIME_REG_OFFSET, time);
+
+	mutex_unlock(&vmcu->mtx);
+
 	if (r < 0)
 		return r;
 
@@ -89,25 +99,30 @@ static int rtc_set(struct device *dev, struct rtc_time *rtctime)
 static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 {
 	struct vmcu *vmcu = dev_get_drvdata(dev);
-	uint32_t val = 0;
+	uint32_t time = 0;
+	uint32_t date = 0;
 	int r = 0;
 
-	r = regmap_read(vmcu->regmap, RTC_TIME_REG_OFFSET, &val);
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	r = regmap_read(vmcu->regmap, RTC_TIME_REG_OFFSET, &time);
+	if (r == 0)
+		r = regmap_read(vmcu->regmap, RTC_DATE_REG_OFFSET, &date);
+
+	mutex_unlock(&vmcu->mtx);
+
 	if (r < 0)
 		return r;
 
-	rtctime->tm_sec = bcd2bin(val >> RTC_TIME_SEC_SHIFT & 0xff);
-	rtctime->tm_min = bcd2bin(val >> RTC_TIME_MIN_SHIFT & 0xff);
-	rtctime->tm_hour = bcd2bin(val >> RTC_TIME_HOUR_SHIFT & 0xff);
-
-	r = regmap_read(vmcu->regmap, RTC_DATE_REG_OFFSET, &val);
-	if (r < 0)
-		return r;
-
-	rtctime->tm_mday = bcd2bin(val >> RTC_DATE_DAY_SHIFT);
-	rtctime->tm_mon = bcd2bin(val >> RTC_DATE_MONTH_SHIFT) - 1;
-	rtctime->tm_year = bcd2bin(val >> RTC_DATE_YEAR_SHIFT) + 100;
-	rtctime->tm_wday = bcd2bin(val >> RTC_DATE_WDAY_SHIFT) - 1;
+	rtctime->tm_sec = bcd2bin(time >> RTC_TIME_SEC_SHIFT & 0xff);
+	rtctime->tm_min = bcd2bin(time >> RTC_TIME_MIN_SHIFT & 0xff);
+	rtctime->tm_hour = bcd2bin(time >> RTC_TIME_HOUR_SHIFT & 0xff);
+	rtctime->tm_mday = bcd2bin(date >> RTC_DATE_DAY_SHIFT);
+	rtctime->tm_mon = bcd2bin(date >> RTC_DATE_MONTH_SHIFT) - 1;
+	rtctime->tm_year = bcd2bin(date >> RTC_DATE_YEAR_SHIFT) + 100;
+	rtctime->tm_wday = bcd2bin(date >> RTC_DATE_WDAY_SHIFT) - 1;
 	rtctime->tm_yday = 0;
 	rtctime->tm_isdst = 0;
 
@@ -138,6 +153,7 @@ static int probe(struct i2c_client *client, const struct i2c_device_id *id)
 	if (IS_ERR(vmcu->regmap))
 		return -EINVAL;
 	i2c_set_clientdata(client, vmcu);
+	mutex_init(&vmcu->mtx);
 
 	// check magic number
 	r = regmap_read(vmcu->regmap, MAGIC_REG_OFFSET, &val);
