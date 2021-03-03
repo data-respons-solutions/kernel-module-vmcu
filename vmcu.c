@@ -39,10 +39,20 @@
 #define RTC_DATE_DAY_SHIFT		16
 #define RTC_DATE_WDAY_SHIFT		24
 
+static const struct regmap_range volatile_ranges[] = {
+	regmap_reg_range(RTC_TIME_REG_OFFSET, RTC_DATE_REG_OFFSET),
+};
+
+static const struct regmap_access_table volatile_access_table = {
+	.yes_ranges = volatile_ranges,
+	.n_yes_ranges = ARRAY_SIZE(volatile_ranges),
+};
+
 static const struct regmap_config vmcu_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 32,
 	.val_format_endian = REGMAP_ENDIAN_LITTLE,
+	.volatile_table = &volatile_access_table,
 };
 
 struct vmcu {
