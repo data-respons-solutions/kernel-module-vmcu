@@ -67,8 +67,8 @@ static int rtc_set(struct device *dev, struct rtc_time *rtctime)
 	uint32_t val = 0;
 	int r = 0;
 
-	val = bin2bcd(rtctime->tm_year) << RTC_DATE_YEAR_SHIFT | bin2bcd(rtctime->tm_mon) << RTC_DATE_MONTH_SHIFT
-			| bin2bcd(rtctime->tm_mday) << RTC_DATE_DAY_SHIFT | bin2bcd(rtctime->tm_wday) << RTC_DATE_WDAY_SHIFT;
+	val = bin2bcd(rtctime->tm_year - 100) << RTC_DATE_YEAR_SHIFT | bin2bcd(rtctime->tm_mon + 1) << RTC_DATE_MONTH_SHIFT
+			| bin2bcd(rtctime->tm_mday) << RTC_DATE_DAY_SHIFT | bin2bcd(rtctime->tm_wday + 1) << RTC_DATE_WDAY_SHIFT;
 	r = regmap_write(vmcu->regmap, RTC_DATE_REG_OFFSET, val);
 	if (r < 0)
 		return r;
@@ -78,9 +78,10 @@ static int rtc_set(struct device *dev, struct rtc_time *rtctime)
 	if (r < 0)
 		return r;
 
-	dev_err(dev, "RTC set to %02d.%02d.%02d %02d:%02d:%02d\n", rtctime->tm_mday,
-		rtctime->tm_mon, rtctime->tm_year, rtctime->tm_hour,
-		rtctime->tm_min, rtctime->tm_sec);
+	dev_dbg(dev, "RTC time write: %d:%d:%d - %d/%d/%d, wd=%d\n",
+		rtctime->tm_hour, rtctime->tm_min, rtctime->tm_sec,
+		rtctime->tm_year, rtctime->tm_mon, rtctime->tm_mday,
+		rtctime->tm_wday);
 
 	return 0;
 }
@@ -94,6 +95,7 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 	r = regmap_read(vmcu->regmap, RTC_TIME_REG_OFFSET, &val);
 	if (r < 0)
 		return r;
+
 	rtctime->tm_sec = bcd2bin(val >> RTC_TIME_SEC_SHIFT & 0xff);
 	rtctime->tm_min = bcd2bin(val >> RTC_TIME_MIN_SHIFT & 0xff);
 	rtctime->tm_hour = bcd2bin(val >> RTC_TIME_HOUR_SHIFT & 0xff);
@@ -101,16 +103,17 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 	r = regmap_read(vmcu->regmap, RTC_DATE_REG_OFFSET, &val);
 	if (r < 0)
 		return r;
+
 	rtctime->tm_mday = bcd2bin(val >> RTC_DATE_DAY_SHIFT);
-	rtctime->tm_mon = bcd2bin(val >> RTC_DATE_MONTH_SHIFT);
-	rtctime->tm_year = bcd2bin(val >> RTC_DATE_YEAR_SHIFT);
-	rtctime->tm_wday = bcd2bin(val >> RTC_DATE_WDAY_SHIFT);
+	rtctime->tm_mon = bcd2bin(val >> RTC_DATE_MONTH_SHIFT) - 1;
+	rtctime->tm_year = bcd2bin(val >> RTC_DATE_YEAR_SHIFT) + 100;
+	rtctime->tm_wday = bcd2bin(val >> RTC_DATE_WDAY_SHIFT) - 1;
 	rtctime->tm_yday = 0;
 	rtctime->tm_isdst = 0;
 
-	dev_err(dev, "RTC time read: %02d.%02d.%02d : %02d.%02d.%02d, wd=%d\n",
-		(rtctime->tm_hour), (rtctime->tm_min), (rtctime->tm_sec),
-		(rtctime->tm_mday), (rtctime->tm_mon), (rtctime->tm_year),
+	dev_dbg(dev, "RTC time read: %d:%d:%d - %d/%d/%d, wd=%d\n",
+		rtctime->tm_hour, rtctime->tm_min, rtctime->tm_sec,
+		rtctime->tm_year, rtctime->tm_mon, rtctime->tm_mday,
 		rtctime->tm_wday);
 
 	return 0;
