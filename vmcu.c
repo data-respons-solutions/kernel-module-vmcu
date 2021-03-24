@@ -24,6 +24,7 @@
 #include <linux/i2c.h>
 #include <linux/rtc.h>
 #include <linux/bcd.h>
+#include <linux/mtd/mtd.h>
 
 #define MAGIC_REG_OFFSET		0x0
 #define MAGIC_REG_VALUE			0x0ec70add
@@ -37,9 +38,18 @@
 #define RTC_DATE_MONTH_SHIFT	8
 #define RTC_DATE_DAY_SHIFT		16
 #define RTC_DATE_WDAY_SHIFT		24
+#define FSTATUS_REG_OFFSET		0x20
+#define FSTATUS_BUSY_MASK		(1 << 0)
+#define FSTATUS_ERASE_MASK		(1 << 2)
+#define FSIZE_REG_OFFSET		0x21
+#define FPTR_REG_OFFSET			0x22
+#define FREAD_REG_OFFSET		0x23
+#define FWRITE_REG_OFFSET		0x24
 
 static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(RTC_TIME_REG_OFFSET, RTC_DATE_REG_OFFSET),
+	regmap_reg_range(FSTATUS_REG_OFFSET, FSTATUS_REG_OFFSET),
+	regmap_reg_range(FPTR_REG_OFFSET, FWRITE_REG_OFFSET),
 };
 
 static const struct regmap_access_table volatile_access_table = {
@@ -59,6 +69,7 @@ struct vmcu {
 	struct regmap			*regmap;
 	struct i2c_client		*client;
 	struct rtc_device 		*rtc;
+	struct mtd_info			mtd;
 };
 
 static int rtc_set(struct device *dev, struct rtc_time *rtctime)
@@ -137,7 +148,141 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 static struct rtc_class_ops vmcu_rtc_ops = {
 	.read_time = rtc_read, .set_time = rtc_set, };
 
-static int probe(struct i2c_client *client, const struct i2c_device_id *id)
+static int flash_busy(struct regmap* regmap)
+{
+	u32 val = 0;
+	int r = regmap_read(regmap, FSTATUS_REG_OFFSET, &val);
+	if (r)
+		return r;
+	if ((val & FSTATUS_BUSY_MASK) == FSTATUS_BUSY_MASK)
+		return -EAGAIN;
+	return 0;
+}
+
+static int flash_erase(struct mtd_info *mtd, struct erase_info *instr)
+{
+	struct regmap *regmap = mtd->priv;
+	u32 val = 0;
+	int r = 0;
+
+	if (instr->addr != 0 || instr->len != mtd->size)
+		return -EINVAL;
+
+	r = flash_busy(regmap);
+	if (r)
+		return r;
+
+	r = regmap_update_bits(regmap, FSTATUS_REG_OFFSET, FSTATUS_ERASE_MASK, FSTATUS_ERASE_MASK);
+	if (r)
+		return r;
+
+	// FIXME: wait for interrupt?
+	do {
+		r = regmap_read(regmap, FSTATUS_REG_OFFSET, &val);
+		if (r)
+			return r;
+	} while ((val & FSTATUS_BUSY_MASK) == FSTATUS_BUSY_MASK);
+
+	return 0;
+}
+
+static int flash_read(struct mtd_info* mtd, loff_t from, size_t len,
+						size_t* retlen, u_char* buf)
+{
+	struct regmap *regmap = mtd->priv;
+	int r = 0;
+	size_t transfer = 0;
+	const size_t read_size = 8;
+
+	dev_err(regmap_get_device(regmap), "read: %lld: %zu\n", from, len);
+	r = flash_busy(regmap);
+	if (r)
+		return r;
+
+	r = regmap_write(regmap, FPTR_REG_OFFSET, from);
+	if (r)
+		return r;
+
+	*retlen = 0;
+	while (*retlen < len) {
+		transfer = len - *retlen;
+		if (transfer > read_size)
+			transfer = read_size;
+
+		r = regmap_raw_read(regmap, FREAD_REG_OFFSET,  buf + *retlen, transfer);
+		if (r) {
+			dev_err(regmap_get_device(regmap), "read error: %d: %u\n", r, *retlen);
+			return r;
+		}
+		*retlen += transfer;
+	}
+
+	return 0;
+}
+
+static int flash_write(struct mtd_info *mtd, loff_t to, size_t len,
+						size_t* retlen, const u_char* buf)
+{
+	struct regmap *regmap = mtd->priv;
+	int r = 0;
+	size_t transfer = 0;
+	const size_t max_write_size = 8;
+
+	r = flash_busy(regmap);
+	if (r)
+		return r;
+
+	r = regmap_write(regmap, FPTR_REG_OFFSET, to);
+	if (r)
+		return r;
+
+	*retlen = 0;
+	while (*retlen < len) {
+		transfer = len - *retlen;
+		if (transfer > max_write_size)
+			transfer = max_write_size;
+
+		r = regmap_raw_write(regmap, FWRITE_REG_OFFSET,  buf + *retlen, transfer);
+		if (r)
+			return r;
+		*retlen += transfer;
+	}
+
+	return 0;
+}
+static int flash_register(struct regmap* regmap, struct mtd_info* mtd)
+{
+	int r = 0;
+	u32 val = 0;
+
+	mtd->type = MTD_NORFLASH;
+	mtd->flags = MTD_CAP_NORFLASH;
+
+	r = regmap_read(regmap, FSIZE_REG_OFFSET, &val);
+	if (r < 0)
+		return r;
+	mtd->size = val;
+	mtd->erasesize = mtd->size;
+	mtd->writesize = 1;
+	mtd->writebufsize = 1;
+	mtd->name = "vmcu";
+	mtd->priv = regmap;
+	mtd->_erase = flash_erase;
+	mtd->_read = flash_read;
+	mtd->_write = flash_write;
+
+	r = mtd_device_parse_register(mtd, NULL, NULL, NULL, 0);
+	if (r < 0) {
+		dev_err(regmap_get_device(regmap), "failed mtd register: %d\n", r);
+		return r;
+	}
+
+	dev_err(regmap_get_device(regmap), "fffsize: %llu\n", mtd->size);
+
+	return 0;
+}
+
+static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 {
 	struct vmcu *vmcu = NULL;
 	u32 val = 0;
@@ -175,6 +320,23 @@ static int probe(struct i2c_client *client, const struct i2c_device_id *id)
 	if (IS_ERR(vmcu->rtc))
 		return PTR_ERR(vmcu->rtc);
 
+	r = flash_register(vmcu->regmap, &vmcu->mtd);
+	if (r < 0)
+		return r;
+	// Get flash size
+
+	return 0;
+}
+
+static int remove(struct i2c_client* client)
+{
+	struct vmcu *vmcu = dev_get_drvdata(&client->dev);
+	int r = 0;
+
+	r = mtd_device_unregister(&vmcu->mtd);
+	if (r < 0)
+		return r;
+
 	return 0;
 }
 
@@ -189,12 +351,10 @@ static struct i2c_driver vmcu_driver = {
 		.owner = THIS_MODULE,
 		.name = "vmcu",
 		.of_match_table = of_vmcu_match,
-		//.pm = &vmcu_pm_ops,
 	},
 	.id_table = vmcu_id,
 	.probe = probe,
-	//.remove = vmcu_remove,
-	//.shutdown = vmcu_shutdown,
+	.remove = remove,
 };
 module_i2c_driver(vmcu_driver);
 
