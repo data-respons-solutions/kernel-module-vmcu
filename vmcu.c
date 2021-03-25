@@ -20,6 +20,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mutex.h>
+#include <linux/delay.h>
 #include <linux/regmap.h>
 #include <linux/i2c.h>
 #include <linux/rtc.h>
@@ -176,8 +177,10 @@ static int flash_erase(struct mtd_info *mtd, struct erase_info *instr)
 	if (r)
 		return r;
 
-	// FIXME: wait for interrupt?
-	do {
+	// FIXME: vmcu unaccessible during erase -> lock access with mtx?
+	// FIXME: interrupt
+	do {;
+		msleep(1500);
 		r = regmap_read(regmap, FSTATUS_REG_OFFSET, &val);
 		if (r)
 			return r;
@@ -192,7 +195,7 @@ static int flash_read(struct mtd_info* mtd, loff_t from, size_t len,
 	struct regmap *regmap = mtd->priv;
 	int r = 0;
 	size_t transfer = 0;
-	const size_t read_size = 8;
+	const size_t read_size = 32;
 
 	dev_err(regmap_get_device(regmap), "read: %lld: %zu\n", from, len);
 	r = flash_busy(regmap);
@@ -226,7 +229,7 @@ static int flash_write(struct mtd_info *mtd, loff_t to, size_t len,
 	struct regmap *regmap = mtd->priv;
 	int r = 0;
 	size_t transfer = 0;
-	const size_t max_write_size = 8;
+	const size_t max_write_size = 32;
 
 	r = flash_busy(regmap);
 	if (r)
