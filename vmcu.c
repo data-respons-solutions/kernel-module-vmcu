@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021  Data Respons
+ * Copyright (c) 2021  Data Respons Solutions
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,12 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ */
+
+/*
+ * Notes
+ *
+ * Remove busy flag from FSTATUS
  */
 
 #include <linux/module.h>
@@ -40,7 +46,6 @@
 #define RTC_DATE_DAY_SHIFT		16
 #define RTC_DATE_WDAY_SHIFT		24
 #define FSTATUS_REG_OFFSET		0x20
-#define FSTATUS_BUSY_MASK		(1 << 0)
 #define FSTATUS_ERASE_MASK		(1 << 2)
 #define FSIZE_REG_OFFSET		0x21
 #define FPTR_REG_OFFSET			0x22
@@ -63,6 +68,7 @@ static const struct regmap_config vmcu_regmap_config = {
 	.val_bits = 32,
 	.val_format_endian = REGMAP_ENDIAN_LITTLE,
 	.volatile_table = &volatile_access_table,
+	.disable_locking = 1,
 };
 
 struct vmcu {
@@ -78,12 +84,12 @@ static int rtc_set(struct device *dev, struct rtc_time *rtctime)
 	struct vmcu *vmcu = dev_get_drvdata(dev);
 	int r = 0;
 
-	uint32_t date = bin2bcd(rtctime->tm_year - 100) << RTC_DATE_YEAR_SHIFT
+	const uint32_t date = bin2bcd(rtctime->tm_year - 100) << RTC_DATE_YEAR_SHIFT
 			| bin2bcd(rtctime->tm_mon + 1) << RTC_DATE_MONTH_SHIFT
 			| bin2bcd(rtctime->tm_mday) << RTC_DATE_DAY_SHIFT
 			| bin2bcd(rtctime->tm_wday + 1) << RTC_DATE_WDAY_SHIFT;
 
-	uint32_t time = bin2bcd(rtctime->tm_hour) << RTC_TIME_HOUR_SHIFT
+	const uint32_t time = bin2bcd(rtctime->tm_hour) << RTC_TIME_HOUR_SHIFT
 			| bin2bcd(rtctime->tm_min) << RTC_TIME_MIN_SHIFT
 			| bin2bcd(rtctime->tm_sec) << RTC_TIME_SEC_SHIFT;
 
@@ -111,8 +117,8 @@ static int rtc_set(struct device *dev, struct rtc_time *rtctime)
 static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 {
 	struct vmcu *vmcu = dev_get_drvdata(dev);
-	uint32_t time = 0;
-	uint32_t date = 0;
+	uint32_t time;
+	uint32_t date;
 	int r = 0;
 
 	r = mutex_lock_interruptible(&vmcu->mtx);
@@ -149,95 +155,85 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 static struct rtc_class_ops vmcu_rtc_ops = {
 	.read_time = rtc_read, .set_time = rtc_set, };
 
-static int flash_busy(struct regmap* regmap)
-{
-	u32 val = 0;
-	int r = regmap_read(regmap, FSTATUS_REG_OFFSET, &val);
-	if (r)
-		return r;
-	if ((val & FSTATUS_BUSY_MASK) == FSTATUS_BUSY_MASK)
-		return -EAGAIN;
-	return 0;
-}
-
 static int flash_erase(struct mtd_info *mtd, struct erase_info *instr)
 {
-	struct regmap *regmap = mtd->priv;
-	u32 val = 0;
+	struct vmcu *vmcu = mtd->priv;
 	int r = 0;
 
 	if (instr->addr != 0 || instr->len != mtd->size)
 		return -EINVAL;
 
-	r = flash_busy(regmap);
+	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return r;
 
-	r = regmap_update_bits(regmap, FSTATUS_REG_OFFSET, FSTATUS_ERASE_MASK, FSTATUS_ERASE_MASK);
+	r = regmap_update_bits(vmcu->regmap, FSTATUS_REG_OFFSET, FSTATUS_ERASE_MASK, FSTATUS_ERASE_MASK);
 	if (r)
-		return r;
+		goto exit;
 
-	// FIXME: vmcu unaccessible during erase -> lock access with mtx?
 	// FIXME: interrupt
-	do {;
-		msleep(1500);
-		r = regmap_read(regmap, FSTATUS_REG_OFFSET, &val);
-		if (r)
-			return r;
-	} while ((val & FSTATUS_BUSY_MASK) == FSTATUS_BUSY_MASK);
+	msleep(1500);
 
-	return 0;
+	r = 0;
+exit:
+	mutex_unlock(&vmcu->mtx);
+	return r;
 }
 
 static int flash_read(struct mtd_info* mtd, loff_t from, size_t len,
 						size_t* retlen, u_char* buf)
 {
-	struct regmap *regmap = mtd->priv;
+	struct vmcu *vmcu = mtd->priv;
 	int r = 0;
 	size_t transfer = 0;
-	const size_t read_size = 32;
+	const size_t read_size = 8;
 
-	dev_err(regmap_get_device(regmap), "read: %lld: %zu\n", from, len);
-	r = flash_busy(regmap);
+	dev_dbg(regmap_get_device(vmcu->regmap), "read: %lld: %zu\n", from, len);
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return r;
 
-	r = regmap_write(regmap, FPTR_REG_OFFSET, from);
+	r = regmap_write(vmcu->regmap, FPTR_REG_OFFSET, from);
 	if (r)
-		return r;
+		goto exit;
 
 	*retlen = 0;
 	while (*retlen < len) {
 		transfer = len - *retlen;
 		if (transfer > read_size)
 			transfer = read_size;
-
-		r = regmap_raw_read(regmap, FREAD_REG_OFFSET,  buf + *retlen, transfer);
+		r = regmap_raw_read(vmcu->regmap, FREAD_REG_OFFSET,  buf + *retlen, transfer);
 		if (r) {
-			dev_err(regmap_get_device(regmap), "read error: %d: %u\n", r, *retlen);
-			return r;
+			goto exit;
 		}
 		*retlen += transfer;
 	}
 
-	return 0;
+	r = 0;
+exit:
+	mutex_unlock(&vmcu->mtx);
+
+	return r;
 }
 
 static int flash_write(struct mtd_info *mtd, loff_t to, size_t len,
 						size_t* retlen, const u_char* buf)
 {
-	struct regmap *regmap = mtd->priv;
+	struct vmcu *vmcu = mtd->priv;
 	int r = 0;
 	size_t transfer = 0;
-	const size_t max_write_size = 32;
+	const size_t max_write_size = 4;
 
-	r = flash_busy(regmap);
+	dev_dbg(regmap_get_device(vmcu->regmap), "write: %lld: %zu\n", to, len);
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return r;
 
-	r = regmap_write(regmap, FPTR_REG_OFFSET, to);
+	r = regmap_write(vmcu->regmap, FPTR_REG_OFFSET, to);
 	if (r)
-		return r;
+		goto exit;
 
 	*retlen = 0;
 	while (*retlen < len) {
@@ -245,42 +241,46 @@ static int flash_write(struct mtd_info *mtd, loff_t to, size_t len,
 		if (transfer > max_write_size)
 			transfer = max_write_size;
 
-		r = regmap_raw_write(regmap, FWRITE_REG_OFFSET,  buf + *retlen, transfer);
+		r = regmap_raw_write(vmcu->regmap, FWRITE_REG_OFFSET,  buf + *retlen, transfer);
 		if (r)
-			return r;
+			goto exit;
 		*retlen += transfer;
 	}
 
-	return 0;
+	r = 0;
+exit:
+	mutex_unlock(&vmcu->mtx);
+
+	return r;
 }
-static int flash_register(struct regmap* regmap, struct mtd_info* mtd)
+static int flash_register(struct vmcu* vmcu)
 {
 	int r = 0;
 	u32 val = 0;
 
-	mtd->type = MTD_NORFLASH;
-	mtd->flags = MTD_CAP_NORFLASH;
+	vmcu->mtd.type = MTD_NORFLASH;
+	vmcu->mtd.flags = MTD_CAP_NORFLASH;
 
-	r = regmap_read(regmap, FSIZE_REG_OFFSET, &val);
+	r = regmap_read(vmcu->regmap, FSIZE_REG_OFFSET, &val);
 	if (r < 0)
 		return r;
-	mtd->size = val;
-	mtd->erasesize = mtd->size;
-	mtd->writesize = 1;
-	mtd->writebufsize = 1;
-	mtd->name = "vmcu";
-	mtd->priv = regmap;
-	mtd->_erase = flash_erase;
-	mtd->_read = flash_read;
-	mtd->_write = flash_write;
+	vmcu->mtd.size = val;
+	vmcu->mtd.erasesize = vmcu->mtd.size;
+	vmcu->mtd.writesize = 1;
+	vmcu->mtd.writebufsize = 1;
+	vmcu->mtd.name = "vmcu";
+	vmcu->mtd.priv = vmcu;
+	vmcu->mtd._erase = flash_erase;
+	vmcu->mtd._read = flash_read;
+	vmcu->mtd._write = flash_write;
 
-	r = mtd_device_parse_register(mtd, NULL, NULL, NULL, 0);
+	r = mtd_device_parse_register(&vmcu->mtd, NULL, NULL, NULL, 0);
 	if (r < 0) {
-		dev_err(regmap_get_device(regmap), "failed mtd register: %d\n", r);
+		dev_err(regmap_get_device(vmcu->regmap), "failed mtd register: %d\n", r);
 		return r;
 	}
 
-	dev_err(regmap_get_device(regmap), "fffsize: %llu\n", mtd->size);
+	dev_dbg(regmap_get_device(vmcu->regmap), "fsize: %llu\n", vmcu->mtd.size);
 
 	return 0;
 }
@@ -305,8 +305,10 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 
 	// check magic number
 	r = regmap_read(vmcu->regmap, MAGIC_REG_OFFSET, &val);
-	if (r < 0)
+	if (r < 0) {
+		dev_err(&client->dev, "failed reg [%x] read: %d\n", MAGIC_REG_OFFSET, r);
 		return r;
+	}
 	if (val != MAGIC_REG_VALUE) {
 		dev_err(&client->dev, "Wrong magic number 0x%x\n", val);
 		return -EINVAL;
@@ -323,10 +325,9 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 	if (IS_ERR(vmcu->rtc))
 		return PTR_ERR(vmcu->rtc);
 
-	r = flash_register(vmcu->regmap, &vmcu->mtd);
+	r = flash_register(vmcu);
 	if (r < 0)
 		return r;
-	// Get flash size
 
 	return 0;
 }
@@ -344,9 +345,9 @@ static int remove(struct i2c_client* client)
 }
 
 static const struct of_device_id of_vmcu_match[] = { { .compatible =
-	"datarespons,vec6200-mcu" }, { /* Sentinel */} };
+	"drs,vmcu" }, { /* Sentinel */} };
 
-static struct i2c_device_id vmcu_id[] = { { "vec6200-mcu", 0 }, { } };
+static struct i2c_device_id vmcu_id[] = { { "vmcu", 0 }, { } };
 MODULE_DEVICE_TABLE(i2c, vmcu_id);
 
 static struct i2c_driver vmcu_driver = {
