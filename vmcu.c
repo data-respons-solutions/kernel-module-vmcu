@@ -32,6 +32,7 @@
 #include <linux/rtc.h>
 #include <linux/bcd.h>
 #include <linux/mtd/mtd.h>
+#include <linux/led-class-multicolor.h>
 
 #define MAGIC_REG_OFFSET		0x0
 #define MAGIC_REG_VALUE			0x0ec70add
@@ -45,6 +46,10 @@
 #define RTC_DATE_MONTH_SHIFT	8
 #define RTC_DATE_DAY_SHIFT		16
 #define RTC_DATE_WDAY_SHIFT		24
+#define REG_LED0				0x4
+#define REG_LED0_GREEN			BIT(0)
+#define REG_LED0_RED			BIT(1)
+#define REG_LED0_BLINK			BIT(2)
 #define FSTATUS_REG_OFFSET		0x20
 #define FSTATUS_ERASE_MASK		(1 << 2)
 #define FSIZE_REG_OFFSET		0x21
@@ -71,12 +76,16 @@ static const struct regmap_config vmcu_regmap_config = {
 	.disable_locking = 1,
 };
 
+#define LED0_NUM_COLORS 2
+
 struct vmcu {
 	struct mutex			mtx;
 	struct regmap			*regmap;
 	struct i2c_client		*client;
 	struct rtc_device 		*rtc;
 	struct mtd_info			mtd;
+	struct led_classdev_mc	led0;
+	struct mc_subled 		led0_subled[LED0_NUM_COLORS];
 };
 
 static int rtc_set(struct device *dev, struct rtc_time *rtctime)
@@ -285,6 +294,88 @@ static int flash_register(struct vmcu* vmcu)
 	return 0;
 }
 
+static int led0_blink(struct led_classdev *cdev, unsigned long *delay_on, unsigned long *delay_off)
+{
+	struct vmcu* vmcu = dev_get_drvdata(cdev->dev->parent);
+	int r = 0;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+	r = regmap_update_bits(vmcu->regmap, REG_LED0, REG_LED0_BLINK, REG_LED0_BLINK);
+	mutex_unlock(&vmcu->mtx);
+	if (r)
+		return r;
+
+	*delay_on = 1000;
+	*delay_off = 1000;
+
+	return 0;
+}
+
+static int led0_set_blocking(struct led_classdev *cdev, enum led_brightness brightness)
+{
+	struct led_classdev_mc *led0 = lcdev_to_mccdev(cdev);
+	struct vmcu* vmcu = dev_get_drvdata(cdev->dev->parent);
+	uint32_t mask = REG_LED0_GREEN | REG_LED0_RED;
+	uint32_t val = 0;
+	int r = 0;
+
+	led_mc_calc_color_components(led0, brightness);
+
+	if (led0->subled_info[0].brightness == 1)
+		val |= REG_LED0_RED;
+	if (led0->subled_info[1].brightness == 1)
+		val |= REG_LED0_GREEN;
+	if (val == 0)
+		mask |= REG_LED0_BLINK;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+	r = regmap_update_bits(vmcu->regmap, REG_LED0, mask, val);
+	mutex_unlock(&vmcu->mtx);
+	if (r)
+		return r;
+
+	return 0;
+}
+
+static int led0_register(struct vmcu* vmcu)
+{
+	struct led_init_data init_data = {};
+	int r = 0;
+	uint32_t val = 0;
+
+	r = regmap_read(vmcu->regmap, REG_LED0, &val);
+	if (r) {
+		dev_err(&vmcu->client->dev, "Failed reading led0 state\n");
+		return r;
+	}
+
+	vmcu->led0_subled[0].color_index = LED_COLOR_ID_RED;
+	vmcu->led0_subled[0].channel = 0;
+	vmcu->led0_subled[0].brightness = (val & REG_LED0_RED) == REG_LED0_RED ? 1 : 0;
+	vmcu->led0_subled[1].color_index = LED_COLOR_ID_GREEN;
+	vmcu->led0_subled[1].channel = 1;
+	vmcu->led0_subled[1].brightness = (val & REG_LED0_GREEN) == REG_LED0_GREEN ? 1 : 0;
+	vmcu->led0.subled_info = &vmcu->led0_subled[0];
+	vmcu->led0.num_colors = LED0_NUM_COLORS;
+	init_data.default_label = ":led0";
+	init_data.devicename = "vmcu";
+	vmcu->led0.led_cdev.max_brightness = 1;
+	vmcu->led0.led_cdev.brightness_set_blocking = led0_set_blocking;
+	vmcu->led0.led_cdev.blink_set = led0_blink;
+
+	r = devm_led_classdev_multicolor_register_ext(&vmcu->client->dev, &vmcu->led0, &init_data);
+	if (r < 0) {
+		dev_err(&vmcu->client->dev, "Failed registering led0\n");
+		return r;
+	}
+
+	return 0;
+}
+
 static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 {
 	struct vmcu *vmcu = NULL;
@@ -325,6 +416,12 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 	if (IS_ERR(vmcu->rtc))
 		return PTR_ERR(vmcu->rtc);
 
+	// led0
+	r = led0_register(vmcu);
+	if (r < 0)
+		return r;
+
+	// flash
 	r = flash_register(vmcu);
 	if (r < 0)
 		return r;
