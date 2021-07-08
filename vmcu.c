@@ -20,6 +20,7 @@
  * Notes
  *
  * Remove busy flag from FSTATUS
+ *
  */
 
 #include <linux/module.h>
@@ -33,6 +34,7 @@
 #include <linux/bcd.h>
 #include <linux/mtd/mtd.h>
 #include <linux/led-class-multicolor.h>
+#include <linux/iio/iio.h>
 
 #define MAGIC_REG_OFFSET		0x0
 #define MAGIC_REG_VALUE			0x0ec70add
@@ -50,6 +52,9 @@
 #define REG_LED0_GREEN			BIT(0)
 #define REG_LED0_RED			BIT(1)
 #define REG_LED0_BLINK			BIT(2)
+#define REG_ADC_MASK			GENMASK(11, 0)
+#define REG_ADC_VBAT			0x11
+#define REG_ADC0				0x12
 #define FSTATUS_REG_OFFSET		0x20
 #define FSTATUS_ERASE_MASK		(1 << 2)
 #define FSIZE_REG_OFFSET		0x21
@@ -376,6 +381,73 @@ static int led0_register(struct vmcu* vmcu)
 	return 0;
 }
 
+static int adc_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *chan, int *val, int *val2, long info)
+{
+	struct vmcu *vmcu = dev_get_drvdata(indio_dev->dev.parent);
+	uint32_t data = 0;
+	int r = 0;
+
+	switch (info) {
+	case IIO_CHAN_INFO_RAW:
+		r = mutex_lock_interruptible(&vmcu->mtx);
+		if (r)
+			return r;
+		r = regmap_read(vmcu->regmap, chan->address, &data);
+		mutex_unlock(&vmcu->mtx);
+		if (r)
+			return r;
+		*val = data & REG_ADC_MASK;
+		return IIO_VAL_INT;
+	}
+
+	return -EINVAL;
+}
+
+static const struct iio_chan_spec vmcu_adc_channels[] = {
+	{ /* [0] */
+		.channel = 0,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.address = REG_ADC0,
+		.extend_name = "adc0",
+	},
+	{ /* [1] */
+		.channel = 1,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.address = REG_ADC_VBAT,
+		.extend_name = "vbat",
+	},
+};
+
+static const struct iio_info vmcu_iio_info = {
+	.read_raw = adc_read_raw,
+};
+
+static int adc_register(struct vmcu *vmcu)
+{
+	struct iio_dev *indio_dev;
+	int r = 0;
+
+	indio_dev = devm_iio_device_alloc(&vmcu->client->dev, 0);
+	if (!indio_dev)
+		return -ENOMEM;
+
+	indio_dev->name = "vmcu";
+	indio_dev->info = &vmcu_iio_info;
+	indio_dev->modes = INDIO_DIRECT_MODE;
+	indio_dev->channels = vmcu_adc_channels;
+	indio_dev->num_channels = ARRAY_SIZE(vmcu_adc_channels);
+
+	r = devm_iio_device_register(&vmcu->client->dev, indio_dev);
+	if (r < 0) {
+		dev_err(&vmcu->client->dev, "Failed registering adc\n");
+		return r;
+	}
+
+	return 0;
+}
+
 static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 {
 	struct vmcu *vmcu = NULL;
@@ -418,6 +490,11 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 
 	// led0
 	r = led0_register(vmcu);
+	if (r < 0)
+		return r;
+
+	// adc
+	r = adc_register(vmcu);
 	if (r < 0)
 		return r;
 
