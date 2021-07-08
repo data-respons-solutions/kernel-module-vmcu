@@ -84,7 +84,9 @@ static const struct regmap_config vmcu_regmap_config = {
 	.disable_locking = 1,
 };
 
-#define LED0_NUM_COLORS 2
+#define LED0_NUM_COLORS	2
+#define ADC_REF_mV 		3300
+#define ADC_BITS 		4096
 
 struct vmcu {
 	struct mutex			mtx;
@@ -417,6 +419,10 @@ static int iio_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *c
 			data = -data;
 		*val = data;
 		return IIO_VAL_INT;
+	case IIO_CHAN_INFO_SCALE:
+		*val = ADC_REF_mV;
+		*val2 = 4096;
+		return IIO_VAL_FRACTIONAL;
 	}
 	return -EINVAL;
 }
@@ -426,6 +432,7 @@ static const struct iio_chan_spec vmcu_iio_channels[] = {
 		.channel = 0,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
 		.address = REG_ADC0,
 		.extend_name = "adc0",
 	},
@@ -433,6 +440,7 @@ static const struct iio_chan_spec vmcu_iio_channels[] = {
 		.channel = 1,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
 		.address = REG_ADC_VBAT,
 		.extend_name = "vbat",
 	},
