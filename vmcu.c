@@ -52,6 +52,9 @@
 #define REG_LED0_GREEN			BIT(0)
 #define REG_LED0_RED			BIT(1)
 #define REG_LED0_BLINK			BIT(2)
+#define REG_SENSOR				0x6
+#define REG_SENSOR_ITEMP		GENMASK(10, 0)
+#define REG_SENSOR_ITEMP_SIGN	BIT(11)
 #define REG_ADC_MASK			GENMASK(11, 0)
 #define REG_ADC_VBAT			0x11
 #define REG_ADC0				0x12
@@ -381,11 +384,12 @@ static int led0_register(struct vmcu* vmcu)
 	return 0;
 }
 
-static int adc_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *chan, int *val, int *val2, long info)
+static int iio_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *chan, int *val, int *val2, long info)
 {
 	struct vmcu *vmcu = dev_get_drvdata(indio_dev->dev.parent);
 	uint32_t data = 0;
 	int r = 0;
+	int sign_bit = 0;
 
 	switch (info) {
 	case IIO_CHAN_INFO_RAW:
@@ -398,12 +402,26 @@ static int adc_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *c
 			return r;
 		*val = data & REG_ADC_MASK;
 		return IIO_VAL_INT;
+	case IIO_CHAN_INFO_PROCESSED:
+		r = mutex_lock_interruptible(&vmcu->mtx);
+		if (r)
+			return r;
+		r = regmap_read(vmcu->regmap, chan->address, &data);
+		mutex_unlock(&vmcu->mtx);
+		if (r)
+			return r;
+		if ((data & REG_SENSOR_ITEMP_SIGN) == REG_SENSOR_ITEMP_SIGN)
+			sign_bit = 1;
+		data &= REG_SENSOR_ITEMP;
+		if (sign_bit)
+			data = -data;
+		*val = data;
+		return IIO_VAL_INT;
 	}
-
 	return -EINVAL;
 }
 
-static const struct iio_chan_spec vmcu_adc_channels[] = {
+static const struct iio_chan_spec vmcu_iio_channels[] = {
 	{ /* [0] */
 		.channel = 0,
 		.type = IIO_VOLTAGE,
@@ -418,10 +436,17 @@ static const struct iio_chan_spec vmcu_adc_channels[] = {
 		.address = REG_ADC_VBAT,
 		.extend_name = "vbat",
 	},
+	{ /* [2] */
+		.channel = 2,
+		.type = IIO_TEMP,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
+		.address = REG_SENSOR,
+		.extend_name = "itemp",
+	},
 };
 
 static const struct iio_info vmcu_iio_info = {
-	.read_raw = adc_read_raw,
+	.read_raw = iio_read_raw,
 };
 
 static int adc_register(struct vmcu *vmcu)
@@ -436,8 +461,8 @@ static int adc_register(struct vmcu *vmcu)
 	indio_dev->name = "vmcu";
 	indio_dev->info = &vmcu_iio_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->channels = vmcu_adc_channels;
-	indio_dev->num_channels = ARRAY_SIZE(vmcu_adc_channels);
+	indio_dev->channels = vmcu_iio_channels;
+	indio_dev->num_channels = ARRAY_SIZE(vmcu_iio_channels);
 
 	r = devm_iio_device_register(&vmcu->client->dev, indio_dev);
 	if (r < 0) {
