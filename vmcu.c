@@ -16,13 +16,6 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-/*
- * Notes
- *
- * Remove busy flag from FSTATUS
- *
- */
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -32,7 +25,6 @@
 #include <linux/i2c.h>
 #include <linux/rtc.h>
 #include <linux/bcd.h>
-#include <linux/mtd/mtd.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/iio/iio.h>
 
@@ -58,17 +50,9 @@
 #define REG_ADC_MASK			GENMASK(11, 0)
 #define REG_ADC_VBAT			0x11
 #define REG_ADC0				0x12
-#define FSTATUS_REG_OFFSET		0x20
-#define FSTATUS_ERASE_MASK		(1 << 2)
-#define FSIZE_REG_OFFSET		0x21
-#define FPTR_REG_OFFSET			0x22
-#define FREAD_REG_OFFSET		0x23
-#define FWRITE_REG_OFFSET		0x24
 
 static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(RTC_TIME_REG_OFFSET, RTC_DATE_REG_OFFSET),
-	regmap_reg_range(FSTATUS_REG_OFFSET, FSTATUS_REG_OFFSET),
-	regmap_reg_range(FPTR_REG_OFFSET, FWRITE_REG_OFFSET),
 };
 
 static const struct regmap_access_table volatile_access_table = {
@@ -93,7 +77,6 @@ struct vmcu {
 	struct regmap			*regmap;
 	struct i2c_client		*client;
 	struct rtc_device 		*rtc;
-	struct mtd_info			mtd;
 	struct led_classdev_mc	led0;
 	struct mc_subled 		led0_subled[LED0_NUM_COLORS];
 };
@@ -173,136 +156,6 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 
 static struct rtc_class_ops vmcu_rtc_ops = {
 	.read_time = rtc_read, .set_time = rtc_set, };
-
-static int flash_erase(struct mtd_info *mtd, struct erase_info *instr)
-{
-	struct vmcu *vmcu = mtd->priv;
-	int r = 0;
-
-	if (instr->addr != 0 || instr->len != mtd->size)
-		return -EINVAL;
-
-	r = mutex_lock_interruptible(&vmcu->mtx);
-	if (r)
-		return r;
-
-	r = regmap_update_bits(vmcu->regmap, FSTATUS_REG_OFFSET, FSTATUS_ERASE_MASK, FSTATUS_ERASE_MASK);
-	if (r)
-		goto exit;
-
-	// FIXME: interrupt
-	msleep(1500);
-
-	r = 0;
-exit:
-	mutex_unlock(&vmcu->mtx);
-	return r;
-}
-
-static int flash_read(struct mtd_info* mtd, loff_t from, size_t len,
-						size_t* retlen, u_char* buf)
-{
-	struct vmcu *vmcu = mtd->priv;
-	int r = 0;
-	size_t transfer = 0;
-	const size_t read_size = 8;
-
-	dev_dbg(regmap_get_device(vmcu->regmap), "read: %lld: %zu\n", from, len);
-
-	r = mutex_lock_interruptible(&vmcu->mtx);
-	if (r)
-		return r;
-
-	r = regmap_write(vmcu->regmap, FPTR_REG_OFFSET, from);
-	if (r)
-		goto exit;
-
-	*retlen = 0;
-	while (*retlen < len) {
-		transfer = len - *retlen;
-		if (transfer > read_size)
-			transfer = read_size;
-		r = regmap_raw_read(vmcu->regmap, FREAD_REG_OFFSET,  buf + *retlen, transfer);
-		if (r) {
-			goto exit;
-		}
-		*retlen += transfer;
-	}
-
-	r = 0;
-exit:
-	mutex_unlock(&vmcu->mtx);
-
-	return r;
-}
-
-static int flash_write(struct mtd_info *mtd, loff_t to, size_t len,
-						size_t* retlen, const u_char* buf)
-{
-	struct vmcu *vmcu = mtd->priv;
-	int r = 0;
-	size_t transfer = 0;
-	const size_t max_write_size = 4;
-
-	dev_dbg(regmap_get_device(vmcu->regmap), "write: %lld: %zu\n", to, len);
-
-	r = mutex_lock_interruptible(&vmcu->mtx);
-	if (r)
-		return r;
-
-	r = regmap_write(vmcu->regmap, FPTR_REG_OFFSET, to);
-	if (r)
-		goto exit;
-
-	*retlen = 0;
-	while (*retlen < len) {
-		transfer = len - *retlen;
-		if (transfer > max_write_size)
-			transfer = max_write_size;
-
-		r = regmap_raw_write(vmcu->regmap, FWRITE_REG_OFFSET,  buf + *retlen, transfer);
-		if (r)
-			goto exit;
-		*retlen += transfer;
-	}
-
-	r = 0;
-exit:
-	mutex_unlock(&vmcu->mtx);
-
-	return r;
-}
-static int flash_register(struct vmcu* vmcu)
-{
-	int r = 0;
-	u32 val = 0;
-
-	vmcu->mtd.type = MTD_NORFLASH;
-	vmcu->mtd.flags = MTD_CAP_NORFLASH;
-
-	r = regmap_read(vmcu->regmap, FSIZE_REG_OFFSET, &val);
-	if (r < 0)
-		return r;
-	vmcu->mtd.size = val;
-	vmcu->mtd.erasesize = vmcu->mtd.size;
-	vmcu->mtd.writesize = 1;
-	vmcu->mtd.writebufsize = 1;
-	vmcu->mtd.name = "vmcu";
-	vmcu->mtd.priv = vmcu;
-	vmcu->mtd._erase = flash_erase;
-	vmcu->mtd._read = flash_read;
-	vmcu->mtd._write = flash_write;
-
-	r = mtd_device_parse_register(&vmcu->mtd, NULL, NULL, NULL, 0);
-	if (r < 0) {
-		dev_err(regmap_get_device(vmcu->regmap), "failed mtd register: %d\n", r);
-		return r;
-	}
-
-	dev_dbg(regmap_get_device(vmcu->regmap), "fsize: %llu\n", vmcu->mtd.size);
-
-	return 0;
-}
 
 static int led0_blink(struct led_classdev *cdev, unsigned long *delay_on, unsigned long *delay_off)
 {
@@ -531,23 +384,6 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 	if (r < 0)
 		return r;
 
-	// flash
-	r = flash_register(vmcu);
-	if (r < 0)
-		return r;
-
-	return 0;
-}
-
-static int remove(struct i2c_client* client)
-{
-	struct vmcu *vmcu = dev_get_drvdata(&client->dev);
-	int r = 0;
-
-	r = mtd_device_unregister(&vmcu->mtd);
-	if (r < 0)
-		return r;
-
 	return 0;
 }
 
@@ -565,7 +401,6 @@ static struct i2c_driver vmcu_driver = {
 	},
 	.id_table = vmcu_id,
 	.probe = probe,
-	.remove = remove,
 };
 module_i2c_driver(vmcu_driver);
 
