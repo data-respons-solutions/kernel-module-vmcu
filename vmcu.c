@@ -56,6 +56,9 @@
 
 static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(RTC_TIME_REG_OFFSET, RTC_DATE_REG_OFFSET),
+	regmap_reg_range(REG_SENSOR, REG_SENSOR),
+	regmap_reg_range(REG_ADC_VBAT, REG_ADC0),
+	regmap_reg_range(REG_STATUS, REG_STATUS),
 };
 
 static const struct regmap_access_table volatile_access_table = {
