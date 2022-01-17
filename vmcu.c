@@ -27,6 +27,7 @@
 #include <linux/bcd.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/iio/iio.h>
+#include <linux/gpio/driver.h>
 
 #define MAGIC_REG_OFFSET		0x0
 #define MAGIC_REG_VALUE			0x0ec70add
@@ -50,6 +51,8 @@
 #define REG_ADC_MASK			GENMASK(11, 0)
 #define REG_ADC_VBAT			0x11
 #define REG_ADC0				0x12
+#define REG_STATUS				0x20
+#define REG_STATUS_IGNITION		BIT(0)
 
 static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(RTC_TIME_REG_OFFSET, RTC_DATE_REG_OFFSET),
@@ -79,6 +82,7 @@ struct vmcu {
 	struct rtc_device 		*rtc;
 	struct led_classdev_mc	led0;
 	struct mc_subled 		led0_subled[LED0_NUM_COLORS];
+	struct gpio_chip		gpio;
 };
 
 static int rtc_set(struct device *dev, struct rtc_time *rtctime)
@@ -334,6 +338,69 @@ static int adc_register(struct vmcu *vmcu)
 	return 0;
 }
 
+static int vmcu_gpio_get_direction(struct gpio_chip* chip, unsigned int offset)
+{
+	switch (offset) {
+	case 0:
+		return GPIO_LINE_DIRECTION_IN;
+	default:
+		return -ENODEV;
+	}
+}
+
+static int vmcu_gpio_get_multiple(struct gpio_chip* chip, unsigned long* mask, unsigned long* bits)
+{
+	struct vmcu *vmcu = gpiochip_get_data(chip);
+	int r = 0;
+	uint32_t data = 0;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	if ((*mask & BIT(0)) == BIT(0)) {
+		r = regmap_read(vmcu->regmap, REG_STATUS, &data);
+		if (!r)
+			*bits |= BIT(0);
+	}
+
+	mutex_unlock(&vmcu->mtx);
+
+	return r;
+}
+
+static int vmcu_gpio_get(struct gpio_chip* chip, unsigned int offset)
+{
+	int r = 0;
+	unsigned long mask = offset;
+	unsigned long bits = 0;
+
+	r = vmcu_gpio_get_multiple(chip, &mask, &bits);
+	if (!r)
+		r = bits ? 1 : 0;
+	return r;
+}
+
+static int gpio_register(struct vmcu *vmcu)
+{
+	int r = 0;
+
+	vmcu->gpio.label = "vmcu";
+	vmcu->gpio.parent = &vmcu->client->dev;
+	vmcu->gpio.owner = THIS_MODULE;
+	vmcu->gpio.get_direction = vmcu_gpio_get_direction;
+	vmcu->gpio.get_multiple = vmcu_gpio_get_multiple;
+	vmcu->gpio.get = vmcu_gpio_get;
+	vmcu->gpio.ngpio = 1;
+	vmcu->gpio.base = -1;
+	vmcu->gpio.can_sleep = true;
+
+	r = devm_gpiochip_add_data(&vmcu->client->dev, &vmcu->gpio, vmcu);
+	if (r < 0)
+		dev_err(&vmcu->client->dev, "Failed registering gpio\n");
+	return r;
+}
+
 static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 {
 	struct vmcu *vmcu = NULL;
@@ -381,6 +448,11 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 
 	// adc
 	r = adc_register(vmcu);
+	if (r < 0)
+		return r;
+
+	// gpio
+	r = gpio_register(vmcu);
 	if (r < 0)
 		return r;
 
