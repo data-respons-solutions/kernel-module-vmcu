@@ -28,6 +28,7 @@
 #include <linux/led-class-multicolor.h>
 #include <linux/iio/iio.h>
 #include <linux/gpio/driver.h>
+#include <linux/firmware.h>
 
 #define MAGIC_REG				0x0
 #define MAGIC_VALUE				0x0ec70add
@@ -91,10 +92,23 @@
 #define GPIO0_STATESETE_MASK	BIT(31)
 /*
  * GPIOCTRL0 -> not volatile
- * APPCTRL -> volatile
- * APPWRITE -> special
- * APPREAD -> special
  */
+#define APPCTRL_REG				0x70
+#define APPCTRL_PARTITION_MASK	BIT(0)
+#define APPCTRL_A_VALID_MASK	BIT(1)
+#define APPCTRL_A_BLANK_MASK	BIT(2)
+#define APPCTRL_B_VALID_MASK	BIT(3)
+#define APPCTRL_B_BLANK_MASK	BIT(4)
+#define APPCTRL_ERASE_MASK		BIT(5)
+#define APPCTRL_SWAP_MASK		BIT(6)
+#define APPCTRL_SIZE_MASK		GENMASK(15, 8)
+#define APPCTRL_SIZE_SHIFT		8
+#define APPCTRL_UNIT_MASK		GENMASK(23, 16)
+#define APPCTRL_UNIT_SHIFT		16
+#define APPCTRL_ALIGNMENT_MASK	GENMASK(31, 24)
+#define APPCTRL_ALIGNMENT_SHIFT	24
+#define APPWRITE_REG			0x75
+#define APPREAD_REG				0x76
 
 static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(RTC_TIME_REG, RTC_DATE_REG),
@@ -102,6 +116,7 @@ static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(ADC_VBAT_REG, ADC4_REG),
 	regmap_reg_range(STATUS_REG, STATUS_REG),
 	regmap_reg_range(GPIO0_REG, GPIO0_REG),
+	regmap_reg_range(APPCTRL_REG, APPCTRL_REG),
 };
 
 static const struct regmap_access_table volatile_access_table = {
@@ -121,6 +136,20 @@ static const struct regmap_config vmcu_regmap_config = {
 #define ADC_REF_mV 		3300
 #define ADC_BITS 		4096
 
+enum vmcu_fw_part {
+	PART_A,
+	PART_B,
+};
+
+struct vmcu_fw {
+	enum vmcu_fw_part part;
+	u32 app_size;
+	u32 write_unit;
+	u32 write_align;
+	u32 file_offset;
+	u32 file_size;
+};
+
 struct vmcu {
 	struct mutex			mtx;
 	struct regmap			*regmap;
@@ -129,6 +158,8 @@ struct vmcu {
 	struct led_classdev_mc	led0;
 	struct mc_subled 		led0_subled[LED0_NUM_COLORS];
 	struct gpio_chip		gpio;
+	struct fw_upload		*fw_upload;
+	struct vmcu_fw			fw;
 };
 
 static int rtc_set(struct device *dev, struct rtc_time *rtctime)
@@ -542,7 +573,209 @@ static int gpio_register(struct vmcu *vmcu)
 	return r;
 }
 
-static int probe(struct i2c_client* client, const struct i2c_device_id* id)
+static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8* data, u32 size)
+{
+	struct vmcu *vmcu = fw_upload->dd_handle;
+	uint32_t val = 0;
+	int blank = 0;
+	int r = 0;
+
+	(void) data;
+
+	/* Input file should consist of partition A and B of equal size */
+	if (size % 2 != 0)
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return FW_UPLOAD_ERR_HW_ERROR;
+
+	r = regmap_read(vmcu->regmap, APPCTRL_REG, &val);
+	if (r) {
+		dev_err(&vmcu->client->dev, "Failed reading appctrl [0x%x]: %d\n", APPCTRL_REG, r);
+		r = FW_UPLOAD_ERR_RW_ERROR;
+		goto exit;
+	}
+
+	dev_info(&vmcu->client->dev, "val: 0x%x\n", val);
+
+	vmcu->fw.write_unit = (val & APPCTRL_UNIT_MASK) >> APPCTRL_UNIT_SHIFT;
+	vmcu->fw.app_size = ((val & APPCTRL_SIZE_MASK) >> APPCTRL_SIZE_SHIFT) * 1024;
+	vmcu->fw.write_align = (val & APPCTRL_ALIGNMENT_MASK) >> APPCTRL_ALIGNMENT_SHIFT;
+	dev_info(&vmcu->client->dev, "App area size: %u: unit: %u: align: %u\n",
+			vmcu->fw.app_size, vmcu->fw.write_unit, vmcu->fw.write_align);
+
+	vmcu->fw.file_size = size / 2;
+	vmcu->fw.file_offset = vmcu->fw.part == PART_A ? 0 : vmcu->fw.file_size;
+	dev_info(&vmcu->client->dev, "File size: %u: offset: %u\n", vmcu->fw.file_size, vmcu->fw.file_offset);
+	if (vmcu->fw.file_size > vmcu->fw.app_size) {
+		r = FW_UPLOAD_ERR_INVALID_SIZE;
+		goto exit;
+	}
+
+	vmcu->fw.part = PART_A;
+	if ((val & APPCTRL_PARTITION_MASK) == APPCTRL_PARTITION_MASK)
+		vmcu->fw.part = PART_B;
+	dev_info(&vmcu->client->dev, "Current partition: %s\n", vmcu->fw.part == PART_A ? "A" : "B");
+
+	if ((vmcu->fw.part == PART_A && (val & APPCTRL_B_BLANK_MASK) == APPCTRL_B_BLANK_MASK)
+		|| (vmcu->fw.part == PART_B && (val & APPCTRL_A_BLANK_MASK) == APPCTRL_A_BLANK_MASK))
+		blank = 1;
+
+	if (blank) {
+		dev_info(&vmcu->client->dev, "next partition blank\n");
+	}
+	else {
+		dev_info(&vmcu->client->dev, "erasing next\n");
+		r = regmap_write_bits(vmcu->regmap, APPCTRL_REG, APPCTRL_ERASE_MASK, APPCTRL_ERASE_MASK);
+		if (r) {
+			dev_err(&vmcu->client->dev, "Failed writing appctrl [0x%x]: %d\n", APPCTRL_REG, r);
+			r = FW_UPLOAD_ERR_RW_ERROR;
+			goto exit;
+		}
+		/* Should be erased well within 10000ms */
+		for (int i = 0; i < 20; ++i) {
+			r = regmap_read(vmcu->regmap, APPCTRL_REG, &val);
+			/* Ignore errors as MCU unresponsive during update */
+			if (r == 0) {
+				if ((vmcu->fw.part == PART_A && (val & APPCTRL_B_BLANK_MASK) == APPCTRL_B_BLANK_MASK)
+					|| (vmcu->fw.part == PART_B && (val & APPCTRL_A_BLANK_MASK) == APPCTRL_A_BLANK_MASK)) {
+					blank = 1;
+					break;
+				}
+			}
+			msleep(500);
+		}
+		if (!blank) {
+			dev_err(&vmcu->client->dev, "Failed erasing -- timeout\n");
+			r = FW_UPLOAD_ERR_TIMEOUT;
+			goto exit;
+		}
+	}
+
+	r = FW_UPLOAD_ERR_NONE;
+
+exit:
+	mutex_unlock(&vmcu->mtx);
+	return r;
+}
+
+static enum fw_upload_err vmcu_fw_write(struct fw_upload* fw_upload, const u8* data, u32 offset, u32 size, u32* written)
+{
+	struct vmcu *vmcu = fw_upload->dd_handle;
+	u8 buf[36];
+	const u32 bytes = size < 32 ? size : 32;
+	int r = 0;
+
+	/* We only use half of the provided firmware file */
+	if (offset >= vmcu->fw.file_size) {
+		*written = vmcu->fw.file_size;
+		return FW_UPLOAD_ERR_NONE;
+	}
+
+	/* Prepare buffer */
+	buf[0] = offset & 0xff;
+	buf[1] = (offset >> 8) & 0xff;
+	buf[2] = bytes & 0xff;
+	buf[3] = (bytes >> 8) & 0xff;
+	memcpy(buf, data + offset + vmcu->fw.file_offset, bytes);
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return FW_UPLOAD_ERR_HW_ERROR;
+
+	/* Write */
+	r = i2c_master_send(vmcu->client, buf, bytes + 4);
+	mutex_unlock(&vmcu->mtx);
+	if (r == bytes + 4) {
+		r = FW_UPLOAD_ERR_NONE;
+		*written = bytes;
+	}
+	else {
+		r = FW_UPLOAD_ERR_RW_ERROR;
+		dev_err(&vmcu->client->dev, "failed writing %u bytes to offset %u [%d]\n", bytes, offset, r);
+	}
+
+	return r;
+}
+
+static enum fw_upload_err vmcu_fw_poll_complete(struct fw_upload* fw_upload)
+{
+	struct vmcu *vmcu = fw_upload->dd_handle;
+	u32 val = 0;
+	int r = 0;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return FW_UPLOAD_ERR_HW_ERROR;
+
+	r = regmap_read(vmcu->regmap, APPCTRL_REG, &val);
+	if (r) {
+		dev_err(&vmcu->client->dev, "Failed reading appctrl [0x%x]: %d\n", APPCTRL_REG, r);
+		r = FW_UPLOAD_ERR_RW_ERROR;
+		goto exit;
+	}
+
+	if ((vmcu->fw.part == PART_A && (val & APPCTRL_B_VALID_MASK) == APPCTRL_B_VALID_MASK)
+		|| (vmcu->fw.part == PART_B && (val & APPCTRL_A_VALID_MASK) == APPCTRL_A_VALID_MASK)) {
+		dev_info(&vmcu->client->dev, "Next partition valid\n");
+	}
+	else {
+		dev_err(&vmcu->client->dev, "Next partition invalid");
+		r = FW_UPLOAD_ERR_HW_ERROR;
+		goto exit;
+	}
+
+	r = regmap_write_bits(vmcu->regmap, APPCTRL_REG, APPCTRL_SWAP_MASK, APPCTRL_SWAP_MASK);
+	if (r) {
+		dev_err(&vmcu->client->dev, "Failed writing appctrl [0x%x]: %d\n", APPCTRL_REG, r);
+		r = FW_UPLOAD_ERR_RW_ERROR;
+		goto exit;
+	}
+
+	r = FW_UPLOAD_ERR_NONE;
+exit:
+	mutex_unlock(&vmcu->mtx);
+	return r;
+}
+
+void vmcu_fw_cancel(struct fw_upload* fw_upload)
+{
+	struct vmcu *vmcu = fw_upload->dd_handle;
+	dev_err(&vmcu->client->dev, "cancel\n");
+}
+
+void vmcu_fw_cleanup(struct fw_upload* fw_upload)
+{
+	struct vmcu *vmcu = fw_upload->dd_handle;
+	dev_err(&vmcu->client->dev, "cleanup\n");
+}
+
+static const struct fw_upload_ops vmcu_fw_ops = {
+        .prepare = vmcu_fw_prepare,
+        .write = vmcu_fw_write,
+        .poll_complete = vmcu_fw_poll_complete,
+        .cancel = vmcu_fw_cancel,
+        .cleanup = vmcu_fw_cleanup,
+};
+
+static int firmware_register(struct vmcu* vmcu)
+{
+	struct fw_upload *fwl = NULL;
+
+	fwl = firmware_upload_register(THIS_MODULE, &vmcu->client->dev,
+					"vmcu", &vmcu_fw_ops, vmcu);
+	if (IS_ERR(fwl)) {
+		dev_err(&vmcu->client->dev, "Failed registering firmware upload [%ld]\n", PTR_ERR(fwl));
+		return PTR_ERR(fwl);
+	}
+
+	vmcu->fw_upload = fwl;
+
+	return 0;
+}
+
+static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 {
 	struct vmcu *vmcu = NULL;
 	u32 val = 0;
@@ -576,9 +809,9 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 	if (r < 0)
 		return r;
 	dev_info(&client->dev, "Version: %u.%u.%u\n",
-			(val & VERSION_MAJOR_MASK) >> VERSION_MAJOR_SHIFT,
-			(val & VERSION_MINOR_MASK) >> VERSION_MINOR_SHIFT,
-			(val & VERSION_PATCH_MASK) >> VERSION_PATCH_SHIFT);
+			(u32) (val & VERSION_MAJOR_MASK) >> VERSION_MAJOR_SHIFT,
+			(u32) (val & VERSION_MINOR_MASK) >> VERSION_MINOR_SHIFT,
+			(u32) (val & VERSION_PATCH_MASK) >> VERSION_PATCH_SHIFT);
 
 	// rtc
 	vmcu->rtc = devm_rtc_device_register(&client->dev, "vmcu", &vmcu_rtc_ops, THIS_MODULE);
@@ -600,6 +833,21 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 	if (r < 0)
 		return r;
 
+	// firmware
+	r = firmware_register(vmcu);
+	if (r < 0)
+		return r;
+
+	return 0;
+}
+
+static int vmcu_remove(struct i2c_client* client)
+{
+	struct vmcu *vmcu = i2c_get_clientdata(client);
+
+	if (vmcu->fw_upload)
+		firmware_upload_unregister(vmcu->fw_upload);
+
 	return 0;
 }
 
@@ -616,7 +864,8 @@ static struct i2c_driver vmcu_driver = {
 		.of_match_table = of_vmcu_match,
 	},
 	.id_table = vmcu_id,
-	.probe = probe,
+	.probe = vmcu_probe,
+	.remove = vmcu_remove,
 };
 module_i2c_driver(vmcu_driver);
 
