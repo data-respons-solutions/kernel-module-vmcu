@@ -44,19 +44,19 @@
 #define RTC_TIME_MIN_MASK		GENMASK(15, 8)
 #define RTC_TIME_MIN_SHIFT		8
 #define RTC_TIME_SEC_MASK		GENMASK(23, 16)
-#define RTC_TIME_SEC_SHFIT		16
+#define RTC_TIME_SEC_SHIFT		16
 #define RTC_DATE_REG			0x3
 #define RTC_DATE_YEAR_MASK		GENMASK(7, 0)
 #define RTC_DATE_YEAR_SHIFT		0
 #define RTC_DATE_MON_MASK		GENMASK(15, 8)
 #define RTC_DATE_MON_SHIFT		8
 #define RTC_DATE_DAY_MASK		GENMASK(23, 16)
-#define RTC_DATE_DAY_SHFIT		16
+#define RTC_DATE_DAY_SHIFT		16
 #define RTC_DATE_WDAY_MASK		GENMASK(31, 24)
 #define RTC_DATE_WDAY_SHIFT		24
 #define LED0_REG				0x4
 #define LED0_GREEN_MASK			BIT(0)
-#define LED0_READ_MASK			BIT(1)
+#define LED0_RED_MASK			BIT(1)
 #define LED0_BLINK_MASK			BIT(2)
 #define SENSOR_REG				0x6
 #define SENSOR_ITEMP_MASK		GENMASK(10, 0)
@@ -85,9 +85,9 @@
 #define GPIO0_SET2_MASK			BIT(10)
 #define GPIO0_SET3_MASK			BIT(11)
 #define GPIO0_STATE0_MASK		BIT(16)
-#define GPIO0_STATE0_MASK		BIT(17)
-#define GPIO0_STATE0_MASK		BIT(18)
-#define GPIO0_STATE0_MASK		BIT(19)
+#define GPIO0_STATE1_MASK		BIT(17)
+#define GPIO0_STATE2_MASK		BIT(18)
+#define GPIO0_STATE3_MASK		BIT(19)
 #define GPIO0_STATESETE_MASK	BIT(31)
 /*
  * GPIOCTRL0 -> not volatile
@@ -97,10 +97,10 @@
  */
 
 static const struct regmap_range volatile_ranges[] = {
-	regmap_reg_range(RTC_TIME_REG_OFFSET, RTC_DATE_REG_OFFSET),
+	regmap_reg_range(RTC_TIME_REG, RTC_DATE_REG),
 	regmap_reg_range(SENSOR_REG, SENSOR_REG),
 	regmap_reg_range(ADC_VBAT_REG, ADC4_REG),
-	regmap_reg_range(REG_STATUS, REG_STATUS),
+	regmap_reg_range(STATUS_REG, STATUS_REG),
 	regmap_reg_range(GPIO0_REG, GPIO0_REG),
 };
 
@@ -137,23 +137,23 @@ static int rtc_set(struct device *dev, struct rtc_time *rtctime)
 	int r = 0;
 
 	const uint32_t date =
-			(rtctime->tm_year - 100) << RTC_DATE_YEAR_SHIFT) & RTC_DATE_YEAR_MASK
-			| (rtctime->tm_mon  << RTC_DATE_MON_SHIFT) & RTC_DATE_MON_MASK
-			| (rtctime->tm_mday << RTC_DATE_DAY_SHIFT) & RTC_DATE_DAY_MASK
-			| (rtctime->tm_wday  << RTC_DATE_WDAY_SHIFT) & RTC_DATE_WDAY_MASK;
+			(((rtctime->tm_year - 100) << RTC_DATE_YEAR_SHIFT) & RTC_DATE_YEAR_MASK)
+			| ((rtctime->tm_mon  << RTC_DATE_MON_SHIFT) & RTC_DATE_MON_MASK)
+			| ((rtctime->tm_mday << RTC_DATE_DAY_SHIFT) & RTC_DATE_DAY_MASK)
+			| ((rtctime->tm_wday  << RTC_DATE_WDAY_SHIFT) & RTC_DATE_WDAY_MASK);
 
 	const uint32_t time =
-			(rtctime->tm_hour << RTC_TIME_HOUR_SHIFT) & RTC_TIME_HOUR_MASK
-			| (rtctime->tm_min << RTC_TIME_MIN_SHIFT) & RTC_TIME_MIN_MASK
-			| (rtctime->tm_sec) << RTC_TIME_SEC_SHIFT) & RTC_TIME_SEC_MASK;
+			((rtctime->tm_hour << RTC_TIME_HOUR_SHIFT) & RTC_TIME_HOUR_MASK)
+			| ((rtctime->tm_min << RTC_TIME_MIN_SHIFT) & RTC_TIME_MIN_MASK)
+			| ((rtctime->tm_sec << RTC_TIME_SEC_SHIFT) & RTC_TIME_SEC_MASK);
 
 	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return r;
 
-	r = regmap_write(vmcu->regmap, RTC_DATE_REG_OFFSET, date);
+	r = regmap_write(vmcu->regmap, RTC_DATE_REG, date);
 	if (r == 0)
-		r = regmap_write(vmcu->regmap, RTC_TIME_REG_OFFSET, time);
+		r = regmap_write(vmcu->regmap, RTC_TIME_REG, time);
 
 	mutex_unlock(&vmcu->mtx);
 
@@ -192,6 +192,7 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 	rtctime->tm_min = (time & RTC_TIME_MIN_MASK) >> RTC_TIME_MIN_SHIFT;
 	rtctime->tm_hour = (time & RTC_TIME_HOUR_MASK) >> RTC_TIME_HOUR_SHIFT;
 	rtctime->tm_mon = (date & RTC_DATE_MON_MASK) >> RTC_DATE_MON_SHIFT;
+	rtctime->tm_mday = (date & RTC_DATE_DAY_MASK) >> RTC_DATE_DAY_SHIFT;
 	rtctime->tm_year = ((date & RTC_DATE_YEAR_MASK) >> RTC_DATE_YEAR_SHIFT) + 100;
 	rtctime->tm_wday = (date & RTC_DATE_WDAY_MASK) >> RTC_DATE_WDAY_SHIFT;
 	rtctime->tm_yday = 0;
@@ -261,7 +262,7 @@ static int led0_register(struct vmcu* vmcu)
 	int r = 0;
 	uint32_t val = 0;
 
-	r = regmap_read(vmcu->regmap, REG_LED0, &val);
+	r = regmap_read(vmcu->regmap, LED0_REG, &val);
 	if (r) {
 		dev_err(&vmcu->client->dev, "Failed reading led0 state\n");
 		return r;
@@ -269,10 +270,10 @@ static int led0_register(struct vmcu* vmcu)
 
 	vmcu->led0_subled[0].color_index = LED_COLOR_ID_RED;
 	vmcu->led0_subled[0].channel = 0;
-	vmcu->led0_subled[0].brightness = (val & REG_LED0_RED) == REG_LED0_RED ? 1 : 0;
+	vmcu->led0_subled[0].brightness = (val & LED0_RED_MASK) == LED0_RED_MASK ? 1 : 0;
 	vmcu->led0_subled[1].color_index = LED_COLOR_ID_GREEN;
 	vmcu->led0_subled[1].channel = 1;
-	vmcu->led0_subled[1].brightness = (val & REG_LED0_GREEN) == REG_LED0_GREEN ? 1 : 0;
+	vmcu->led0_subled[1].brightness = (val & LED0_GREEN_MASK) == LED0_GREEN_MASK ? 1 : 0;
 	vmcu->led0.subled_info = &vmcu->led0_subled[0];
 	vmcu->led0.num_colors = LED0_NUM_COLORS;
 	init_data.default_label = ":led0";
@@ -450,13 +451,13 @@ static int vmcu_gpio_get_multiple(struct gpio_chip* chip, unsigned long* mask, u
 		if (r)
 			goto exit;
 		if ((data & STATUS_IGNITION1_MASK) == STATUS_IGNITION1_MASK)
-			*bits | = BIT(0);
+			*bits |= BIT(0);
 		if ((data & STATUS_IGNITION1_MASK) == STATUS_IGNITION2_MASK)
-			*bits | = BIT(1);
+			*bits |= BIT(1);
 	}
 
-	if ((*mask & gpiomask) != 0) {
-		r = regmap_read(vmcu->regmap, STATUS_REG, &data);
+	if ((*mask & gpio_mask) != 0) {
+		r = regmap_read(vmcu->regmap, GPIO0_REG, &data);
 		if (r)
 			goto exit;
 		if ((data & GPIO0_STATE0_MASK) == GPIO0_STATE0_MASK)
@@ -478,13 +479,45 @@ exit:
 static int vmcu_gpio_get(struct gpio_chip* chip, unsigned int offset)
 {
 	int r = 0;
-	unsigned long mask = offset;
+	unsigned long mask = 1 << offset;
 	unsigned long bits = 0;
 
 	r = vmcu_gpio_get_multiple(chip, &mask, &bits);
 	if (!r)
 		r = bits ? 1 : 0;
 	return r;
+}
+
+static void vmcu_gpio_set_multiple(struct gpio_chip* chip, unsigned long* mask, unsigned long* bits)
+{
+	struct vmcu *vmcu = gpiochip_get_data(chip);
+	int r = 0;
+	uint32_t data = 0;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return;
+
+	if ((*mask & BIT(2)) == BIT(2))
+		data |=	(*bits & BIT(2)) == BIT(2) ? GPIO0_SET0_MASK : GPIO0_RESET0_MASK;
+	if ((*mask & BIT(3)) == BIT(3))
+		data |=	(*bits & BIT(3)) == BIT(3) ? GPIO0_SET1_MASK : GPIO0_RESET1_MASK;
+	if ((*mask & BIT(4)) == BIT(4))
+		data |=	(*bits & BIT(4)) == BIT(4) ? GPIO0_SET2_MASK : GPIO0_RESET2_MASK;
+	if ((*mask & BIT(5)) == BIT(5))
+		data |=	(*bits & BIT(5)) == BIT(5) ? GPIO0_SET3_MASK : GPIO0_RESET3_MASK;
+
+	if (data != 0)
+		regmap_write(vmcu->regmap, GPIO0_REG, data);
+
+	mutex_unlock(&vmcu->mtx);
+}
+
+static void vmcu_gpio_set(struct gpio_chip* chip, unsigned int offset, int value)
+{
+	unsigned long mask = 1 << offset;
+	unsigned long bits = value ? mask : 0;
+	vmcu_gpio_set_multiple(chip, &mask, &bits);
 }
 
 static int gpio_register(struct vmcu *vmcu)
@@ -497,6 +530,8 @@ static int gpio_register(struct vmcu *vmcu)
 	vmcu->gpio.get_direction = vmcu_gpio_get_direction;
 	vmcu->gpio.get_multiple = vmcu_gpio_get_multiple;
 	vmcu->gpio.get = vmcu_gpio_get;
+	vmcu->gpio.set_multiple = vmcu_gpio_set_multiple;
+	vmcu->gpio.set = vmcu_gpio_set;
 	vmcu->gpio.ngpio = 6;
 	vmcu->gpio.base = -1;
 	vmcu->gpio.can_sleep = true;
@@ -543,8 +578,7 @@ static int probe(struct i2c_client* client, const struct i2c_device_id* id)
 	dev_info(&client->dev, "Version: %u.%u.%u\n",
 			(val & VERSION_MAJOR_MASK) >> VERSION_MAJOR_SHIFT,
 			(val & VERSION_MINOR_MASK) >> VERSION_MINOR_SHIFT,
-			(val & VERSION_PATCH_MASK) >> VERSION_PATCH_SHIFT,
-		);
+			(val & VERSION_PATCH_MASK) >> VERSION_PATCH_SHIFT);
 
 	// rtc
 	vmcu->rtc = devm_rtc_device_register(&client->dev, "vmcu", &vmcu_rtc_ops, THIS_MODULE);
