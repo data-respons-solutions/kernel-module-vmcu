@@ -25,6 +25,7 @@
 #include <linux/i2c.h>
 #include <linux/rtc.h>
 #include <linux/bcd.h>
+#include <linux/crc32.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/iio/iio.h>
 #include <linux/gpio/driver.h>
@@ -591,12 +592,153 @@ static int gpio_register(struct vmcu *vmcu)
  *
  * Flashing procedure:
  *  - Check A or B partition (current = running partition, next = update target)
+ *  - Verify current partition is valid (Firmware update not already in progress)
  *  - Find corresponding hdr/binary from firmware blob
  *  - Erase next if not blank
  *  - Write hdr/binary to next
  *  - Check hdr/binary in next validated by MCU
  *  - Swap to next, invalidating current
+ *  - User should reboot system
  */
+
+static enum vmcu_fw_part vmcu_fw_current(u32 appctrl)
+{
+	if ((appctrl & APPCTRL_PARTITION_MASK) == APPCTRL_PARTITION_MASK)
+		return PART_B;
+	return PART_A;
+}
+
+static enum vmcu_fw_part vmcu_fw_next(u32 appctrl)
+{
+	return vmcu_fw_current(appctrl) == PART_A ? PART_B : PART_A;
+}
+
+static int vmcu_fw_next_blank(u32 appctrl)
+{
+	const enum vmcu_fw_part next = vmcu_fw_next(appctr);
+	if (next == PART_A && (appctrl & APPCTRL_A_BLANK_MASK) == APPCTRL_A_BLANK_MASK)
+		return true;
+	if (next == PART_B && (appctrl & APPCTRL_B_BLANK_MASK) == APPCTRL_B_BLANK_MASK)
+		return true;
+	return false;
+}
+
+static int vmcu_fw_valid(u32 appctrl, enum vmcu_fw_part part)
+{
+	if (part == PART_A && (appctrl & APPCTRL_A_VALID_MASK) == APPCTRL_A_VALID_MASK)
+		return true;
+	if (part == PART_A && (appctrl & APPCTRL_B_VALID_MASK) == APPCTRL_B_VALID_MASK)
+		return true;
+	return false;
+}
+
+static int vmcu_fw_next_erase(struct vmcu* vmcu)
+{
+	const unsigned int erase_wait_ms = 1000;
+	int r = 0;
+	u32 val = 0;
+
+	/* init erase */
+	r = regmap_write_bits(vmcu->regmap, APPCTRL_REG, APPCTRL_ERASE_MASK, APPCTRL_ERASE_MASK);
+	if (r) {
+		dev_err(&vmcu->client->dev, "Failed writing appctrl [0x%x]: %d\n", APPCTRL_REG, r);
+		return FW_UPLOAD_ERR_RW_ERROR;
+	}
+
+	/* Wait for erase to finish */
+	msleep(erase_wait_ms);
+
+	/* Verify next partition is blank */
+	r = regmap_read(vmcu->regmap, APPCTRL_REG, &val);
+	if (r) {
+		dev_err(&vmcu->client->dev, "Failed writing appctrl [0x%x]: %d\n", APPCTRL_REG, r);
+		return FW_UPLOAD_ERR_RW_ERROR;
+	}
+	if (!vmcu_fw_next_blank(val)) {
+		dev_err(&vmcu->client->dev, "Failed erasing -- not blank\n");
+		return FW_UPLOAD_ERR_HW_ERROR
+	}
+
+	return FW_UPLOAD_ERR_NONE
+}
+
+enum vmcu_application_header_options {
+	AHO_PARTITION_A = 1 << 0,
+	AHO_PARTITION_B = 1 << 1,
+};
+
+struct vmcu_app_hdr {
+	u32 magic;
+	u32 size;
+	u32 crc32;
+	u32 options;
+	u32 rsvd[3];
+	u32 hdr_crc32;
+};
+#define VMCU_APPLICATION_HEADER_MAGIC (0x586e479c)
+
+static int extract_and_validate_blob(const u8* data, u32 size, struct vmcu_app_hdr* hdr)
+{
+	if (size < sizeof(struct vmcu_app_hdr))
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+
+	const struct vmcu_app_hdr* phdr = (const struct vmcu_app_hdr*) data;
+	hdr->magic = le32_to_cpu(phdr->magic);
+	hdr->size = le32_to_cpu(phdr->size);
+	hdr->crc32 = le32_to_cpu(phdr->crc32);
+	hdr->options = le32_to_cpu(phdr->options);
+	hdr->rsvd[0] = le32_to_cpu(phdr->rsvd[0]);
+	hdr->rsvd[1] = le32_to_cpu(phdr->rsvd[1]);
+	hdr->rsvd[2] = le32_to_cpu(phdr->rsvd[2]);
+	hdr->rsvd[3] = le32_to_cpu(phdr->rsvd[3]);
+	hdr->hdr_crc32 = le32_to_cpu(phdr->hdr_crc32);
+
+	if (hdr->magic != VMCU_APPLICATION_HEADER_MAGIC)
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+	const u32 hdr_crc32 = crc32(0 ^ 0xffffffff, hdr, sizeof(struct vmcu_app_hdr) - sizeof(u32)) ^ 0xffffffff;
+	if (hdr_crc32 != hdr->hdr_crc32)
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+	if (hdr->size > size - sizeof(struct vmcu_app_hdr))
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+	const u32 data_crc32 = crc32(0 ^ 0xffffffff, data + sizeof(struct vmcu_app_hdr), hdr->size) ^ 0xffffffff;
+	if (data_crc32 != hdr->crc32)
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+
+	return FW_UPLOAD_ERR_NONE;
+}
+
+static int vmcu_fw_blob_get_part(const u8* data, u32 size, enum vmcu_fw_part part, u32* offset, u32* size)
+{
+	/* Verify both applications even though only one used */
+	struct vmcu_app_hdr hdr_a;
+	struct vmcu_app_hdr hdr_b;
+	int r = 0;
+
+	r = extract_and_validate_blob(data, size, &hdr_a);
+	if (r != FW_UPLOAD_ERR_NONE)
+		return r;
+	if ((hdr_a.options & AHO_PARTITION_A) != AHO_PARTITION_A)
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+
+	const u32 fw_b_offset = sizeof(struct vmcu_app_hdr) + hdr_a.size;
+	if (size < fw_b_offset)
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+	r = extract_and_validate_blob(data + fw_b_offset, size - fw_b_offset, &hdr_b);
+	if (r != FW_UPLOAD_ERR_NONE)
+		return r;
+	if ((hdr_b.options & AHO_PARTITION_B) != AHO_PARTITION_B)
+		return FW_UPLOAD_ERR_INVALID_SIZE;
+
+	if (part == PART_A) {
+		*offset = 0;
+		*size = hdr_a.size;
+	}
+	if (part == PART_B) {
+		*offset = fw_b_offset;
+		*size = hdr_b.size;
+	}
+	return FW_UPLOAD_ERR_NONE;
+}
 
 static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8* data, u32 size)
 {
@@ -604,8 +746,6 @@ static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8*
 	uint32_t val = 0;
 	int blank = 0;
 	int r = 0;
-
-	(void) data;
 
 	/* Input file should consist of partition A and B of equal size */
 	if (size % 2 != 0)
@@ -621,61 +761,49 @@ static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8*
 		r = FW_UPLOAD_ERR_RW_ERROR;
 		goto exit;
 	}
+	dev_dbg(&vmcu->client->dev, "APPCTRL: 0x%x\n", val);
 
-	dev_info(&vmcu->client->dev, "val: 0x%x\n", val);
 
+	vmcu->fw.part = vmcu_fw_current(val);
+	dev_info(&vmcu->client->dev, "Current partition: %s\n", vmcu->fw.part == PART_A ? "A" : "B");
+
+	/* Check firmware blob contains valid application */
+	r = vmcu_fw_blob_get_part(data, size, vmcu->fw.part, &vmcu->fw.file_offset, &vmcu->fw.file_size);
+	if (r != FW_UPLOAD_ERR_NONE) {
+		dev_err(&vmcu->client->dev, "Failed validating firmware blob\n");
+		goto exit;
+	}
+	dev_info(&vmcu->client->dev, "File size: %u: offset: %u\n", vmcu->fw.file_size, vmcu->fw.file_offset);
+
+	/* Update already ongoing if current partition not valid */
+	if (!vmcu_fw_valid(val, vmcu->fw.part)) {
+		dev_err(&vmcu->client->dev, "Update already ongoing -- aborting\n");
+		r = FW_UPLOAD_ERR_HW_ERROR;
+		goto exit;
+	}
+
+	/* Read out flash characteristics */
 	vmcu->fw.write_unit = (val & APPCTRL_UNIT_MASK) >> APPCTRL_UNIT_SHIFT;
 	vmcu->fw.app_size = ((val & APPCTRL_SIZE_MASK) >> APPCTRL_SIZE_SHIFT) * 1024;
 	vmcu->fw.write_align = (val & APPCTRL_ALIGNMENT_MASK) >> APPCTRL_ALIGNMENT_SHIFT;
 	dev_info(&vmcu->client->dev, "App area size: %u: unit: %u: align: %u\n",
 			vmcu->fw.app_size, vmcu->fw.write_unit, vmcu->fw.write_align);
 
-	vmcu->fw.file_size = size / 2;
-	vmcu->fw.file_offset = vmcu->fw.part == PART_A ? 0 : vmcu->fw.file_size;
-	dev_info(&vmcu->client->dev, "File size: %u: offset: %u\n", vmcu->fw.file_size, vmcu->fw.file_offset);
+	/* Make sure firmware fits in flash */
 	if (vmcu->fw.file_size > vmcu->fw.app_size) {
 		r = FW_UPLOAD_ERR_INVALID_SIZE;
 		goto exit;
 	}
 
-	vmcu->fw.part = PART_A;
-	if ((val & APPCTRL_PARTITION_MASK) == APPCTRL_PARTITION_MASK)
-		vmcu->fw.part = PART_B;
-	dev_info(&vmcu->client->dev, "Current partition: %s\n", vmcu->fw.part == PART_A ? "A" : "B");
-
-	if ((vmcu->fw.part == PART_A && (val & APPCTRL_B_BLANK_MASK) == APPCTRL_B_BLANK_MASK)
-		|| (vmcu->fw.part == PART_B && (val & APPCTRL_A_BLANK_MASK) == APPCTRL_A_BLANK_MASK))
-		blank = 1;
-
-	if (blank) {
+	/* Erase if needed */
+	if (vmcu_fw_next_blank(val)) {
 		dev_info(&vmcu->client->dev, "next partition blank\n");
 	}
 	else {
 		dev_info(&vmcu->client->dev, "erasing next\n");
-		r = regmap_write_bits(vmcu->regmap, APPCTRL_REG, APPCTRL_ERASE_MASK, APPCTRL_ERASE_MASK);
-		if (r) {
-			dev_err(&vmcu->client->dev, "Failed writing appctrl [0x%x]: %d\n", APPCTRL_REG, r);
-			r = FW_UPLOAD_ERR_RW_ERROR;
+		r = vmcu_fw_next_erase(vmcu);
+		if (r != FW_UPLOAD_ERR_NONE)
 			goto exit;
-		}
-		/* Should be erased well within 10000ms */
-		for (int i = 0; i < 20; ++i) {
-			r = regmap_read(vmcu->regmap, APPCTRL_REG, &val);
-			/* Ignore errors as MCU unresponsive during update */
-			if (r == 0) {
-				if ((vmcu->fw.part == PART_A && (val & APPCTRL_B_BLANK_MASK) == APPCTRL_B_BLANK_MASK)
-					|| (vmcu->fw.part == PART_B && (val & APPCTRL_A_BLANK_MASK) == APPCTRL_A_BLANK_MASK)) {
-					blank = 1;
-					break;
-				}
-			}
-			msleep(500);
-		}
-		if (!blank) {
-			dev_err(&vmcu->client->dev, "Failed erasing -- timeout\n");
-			r = FW_UPLOAD_ERR_TIMEOUT;
-			goto exit;
-		}
 	}
 
 	r = FW_UPLOAD_ERR_NONE;
@@ -741,8 +869,8 @@ static enum fw_upload_err vmcu_fw_poll_complete(struct fw_upload* fw_upload)
 		goto exit;
 	}
 
-	if ((vmcu->fw.part == PART_A && (val & APPCTRL_B_VALID_MASK) == APPCTRL_B_VALID_MASK)
-		|| (vmcu->fw.part == PART_B && (val & APPCTRL_A_VALID_MASK) == APPCTRL_A_VALID_MASK)) {
+	/* Check written partition is valid */
+	if (vmcu_fw_valid(val, vmcu->fw.part == PART_A ? PART_B : PART_A)) {
 		dev_info(&vmcu->client->dev, "Next partition valid\n");
 	}
 	else {
@@ -751,10 +879,24 @@ static enum fw_upload_err vmcu_fw_poll_complete(struct fw_upload* fw_upload)
 		goto exit;
 	}
 
+	/* Perform swap */
 	r = regmap_write_bits(vmcu->regmap, APPCTRL_REG, APPCTRL_SWAP_MASK, APPCTRL_SWAP_MASK);
 	if (r) {
 		dev_err(&vmcu->client->dev, "Failed writing appctrl [0x%x]: %d\n", APPCTRL_REG, r);
 		r = FW_UPLOAD_ERR_RW_ERROR;
+		goto exit;
+	}
+
+	/* Confirm swapped by checking current partition is now invalid */
+	r = regmap_read(vmcu->regmap, APPCTRL_REG, &val);
+	if (r) {
+		dev_err(&vmcu->client->dev, "Failed reading appctrl [0x%x]: %d\n", APPCTRL_REG, r);
+		r = FW_UPLOAD_ERR_RW_ERROR;
+		goto exit;
+	}
+	if (vmcu_fw_valid(val, vmcu->fw.part)) {
+		dev_err(&vmcu->client->dev, "Failed swap\n");
+		r = FW_UPLOAD_ERR_HW_ERROR;
 		goto exit;
 	}
 
