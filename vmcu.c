@@ -573,6 +573,31 @@ static int gpio_register(struct vmcu *vmcu)
 	return r;
 }
 
+/*
+ * Firmware update
+ *
+ * The MCU supports application updates by an A/B partition scheme.
+ * Relocation is not supported and the provided binaries
+ * must be compiled for either side A or B.
+ * Provided firmware image is expected to be a concatenated blob
+ * of A-header, A-binary, B-header, B-binary.
+ *
+ * Application partitions are 28KiB in size and consist of 14 pages
+ * of 2KiB each. Erase time per page is max 40ms which leads to an
+ * erase time of 14 * 40 = 560ms.
+ * Code runs from flash and during erase any operations reading from
+ * flash are blocking.
+ * We simply wait for 1000ms after an erase operation is started.
+ *
+ * Flashing procedure:
+ *  - Check A or B partition (current = running partition, next = update target)
+ *  - Find corresponding hdr/binary from firmware blob
+ *  - Erase next if not blank
+ *  - Write hdr/binary to next
+ *  - Check hdr/binary in next validated by MCU
+ *  - Swap to next, invalidating current
+ */
+
 static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8* data, u32 size)
 {
 	struct vmcu *vmcu = fw_upload->dd_handle;
