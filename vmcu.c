@@ -615,7 +615,7 @@ static enum vmcu_fw_part vmcu_fw_next(u32 appctrl)
 
 static int vmcu_fw_next_blank(u32 appctrl)
 {
-	const enum vmcu_fw_part next = vmcu_fw_next(appctr);
+	const enum vmcu_fw_part next = vmcu_fw_next(appctrl);
 	if (next == PART_A && (appctrl & APPCTRL_A_BLANK_MASK) == APPCTRL_A_BLANK_MASK)
 		return true;
 	if (next == PART_B && (appctrl & APPCTRL_B_BLANK_MASK) == APPCTRL_B_BLANK_MASK)
@@ -656,10 +656,10 @@ static int vmcu_fw_next_erase(struct vmcu* vmcu)
 	}
 	if (!vmcu_fw_next_blank(val)) {
 		dev_err(&vmcu->client->dev, "Failed erasing -- not blank\n");
-		return FW_UPLOAD_ERR_HW_ERROR
+		return FW_UPLOAD_ERR_HW_ERROR;
 	}
 
-	return FW_UPLOAD_ERR_NONE
+	return FW_UPLOAD_ERR_NONE;
 }
 
 enum vmcu_application_header_options {
@@ -679,10 +679,14 @@ struct vmcu_app_hdr {
 
 static int extract_and_validate_blob(const u8* data, u32 size, struct vmcu_app_hdr* hdr)
 {
+	struct vmcu_app_hdr* phdr = NULL;
+	u32 hdr_crc32 = 0;
+	u32 data_crc32 = 0;
+
 	if (size < sizeof(struct vmcu_app_hdr))
 		return FW_UPLOAD_ERR_INVALID_SIZE;
 
-	const struct vmcu_app_hdr* phdr = (const struct vmcu_app_hdr*) data;
+	phdr = (struct vmcu_app_hdr*) data;
 	hdr->magic = le32_to_cpu(phdr->magic);
 	hdr->size = le32_to_cpu(phdr->size);
 	hdr->crc32 = le32_to_cpu(phdr->crc32);
@@ -690,40 +694,40 @@ static int extract_and_validate_blob(const u8* data, u32 size, struct vmcu_app_h
 	hdr->rsvd[0] = le32_to_cpu(phdr->rsvd[0]);
 	hdr->rsvd[1] = le32_to_cpu(phdr->rsvd[1]);
 	hdr->rsvd[2] = le32_to_cpu(phdr->rsvd[2]);
-	hdr->rsvd[3] = le32_to_cpu(phdr->rsvd[3]);
 	hdr->hdr_crc32 = le32_to_cpu(phdr->hdr_crc32);
 
 	if (hdr->magic != VMCU_APPLICATION_HEADER_MAGIC)
 		return FW_UPLOAD_ERR_INVALID_SIZE;
-	const u32 hdr_crc32 = crc32(0 ^ 0xffffffff, hdr, sizeof(struct vmcu_app_hdr) - sizeof(u32)) ^ 0xffffffff;
+	hdr_crc32 = crc32(0 ^ 0xffffffff, hdr, sizeof(struct vmcu_app_hdr) - sizeof(u32)) ^ 0xffffffff;
 	if (hdr_crc32 != hdr->hdr_crc32)
 		return FW_UPLOAD_ERR_INVALID_SIZE;
 	if (hdr->size > size - sizeof(struct vmcu_app_hdr))
 		return FW_UPLOAD_ERR_INVALID_SIZE;
-	const u32 data_crc32 = crc32(0 ^ 0xffffffff, data + sizeof(struct vmcu_app_hdr), hdr->size) ^ 0xffffffff;
+	data_crc32 = crc32(0 ^ 0xffffffff, data + sizeof(struct vmcu_app_hdr), hdr->size) ^ 0xffffffff;
 	if (data_crc32 != hdr->crc32)
 		return FW_UPLOAD_ERR_INVALID_SIZE;
 
 	return FW_UPLOAD_ERR_NONE;
 }
 
-static int vmcu_fw_blob_get_part(const u8* data, u32 size, enum vmcu_fw_part part, u32* offset, u32* size)
+static int vmcu_fw_blob_get_part(const u8* data, u32 data_size, enum vmcu_fw_part part, u32* offset, u32* size)
 {
 	/* Verify both applications even though only one used */
 	struct vmcu_app_hdr hdr_a;
 	struct vmcu_app_hdr hdr_b;
 	int r = 0;
+	u32 fw_b_offset = 0;
 
-	r = extract_and_validate_blob(data, size, &hdr_a);
+	r = extract_and_validate_blob(data, data_size, &hdr_a);
 	if (r != FW_UPLOAD_ERR_NONE)
 		return r;
 	if ((hdr_a.options & AHO_PARTITION_A) != AHO_PARTITION_A)
 		return FW_UPLOAD_ERR_INVALID_SIZE;
 
-	const u32 fw_b_offset = sizeof(struct vmcu_app_hdr) + hdr_a.size;
-	if (size < fw_b_offset)
+	fw_b_offset = sizeof(struct vmcu_app_hdr) + hdr_a.size;
+	if (data_size < fw_b_offset)
 		return FW_UPLOAD_ERR_INVALID_SIZE;
-	r = extract_and_validate_blob(data + fw_b_offset, size - fw_b_offset, &hdr_b);
+	r = extract_and_validate_blob(data + fw_b_offset, data_size - fw_b_offset, &hdr_b);
 	if (r != FW_UPLOAD_ERR_NONE)
 		return r;
 	if ((hdr_b.options & AHO_PARTITION_B) != AHO_PARTITION_B)
@@ -744,7 +748,6 @@ static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8*
 {
 	struct vmcu *vmcu = fw_upload->dd_handle;
 	uint32_t val = 0;
-	int blank = 0;
 	int r = 0;
 
 	/* Input file should consist of partition A and B of equal size */
