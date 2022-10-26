@@ -627,7 +627,7 @@ static int vmcu_fw_valid(u32 appctrl, enum vmcu_fw_part part)
 {
 	if (part == PART_A && (appctrl & APPCTRL_A_VALID_MASK) == APPCTRL_A_VALID_MASK)
 		return true;
-	if (part == PART_A && (appctrl & APPCTRL_B_VALID_MASK) == APPCTRL_B_VALID_MASK)
+	if (part == PART_B && (appctrl & APPCTRL_B_VALID_MASK) == APPCTRL_B_VALID_MASK)
 		return true;
 	return false;
 }
@@ -735,11 +735,11 @@ static int vmcu_fw_blob_get_part(const u8* data, u32 data_size, enum vmcu_fw_par
 
 	if (part == PART_A) {
 		*offset = 0;
-		*size = hdr_a.size;
+		*size = hdr_a.size + sizeof(struct vmcu_app_hdr);
 	}
 	if (part == PART_B) {
 		*offset = fw_b_offset;
-		*size = hdr_b.size;
+		*size = hdr_b.size + sizeof(struct vmcu_app_hdr);
 	}
 	return FW_UPLOAD_ERR_NONE;
 }
@@ -771,12 +771,12 @@ static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8*
 	dev_info(&vmcu->client->dev, "Current partition: %s\n", vmcu->fw.part == PART_A ? "A" : "B");
 
 	/* Check firmware blob contains valid application */
-	r = vmcu_fw_blob_get_part(data, size, vmcu->fw.part, &vmcu->fw.file_offset, &vmcu->fw.file_size);
+	r = vmcu_fw_blob_get_part(data, size, vmcu_fw_next(val), &vmcu->fw.file_offset, &vmcu->fw.file_size);
 	if (r != FW_UPLOAD_ERR_NONE) {
 		dev_err(&vmcu->client->dev, "Failed validating firmware blob\n");
 		goto exit;
 	}
-	dev_info(&vmcu->client->dev, "File size: %u: offset: %u\n", vmcu->fw.file_size, vmcu->fw.file_offset);
+	dev_info(&vmcu->client->dev, "File size: %u: file offset: %u\n", vmcu->fw.file_size, vmcu->fw.file_offset);
 
 	/* Update already ongoing if current partition not valid */
 	if (!vmcu_fw_valid(val, vmcu->fw.part)) {
@@ -819,8 +819,10 @@ exit:
 static enum fw_upload_err vmcu_fw_write(struct fw_upload* fw_upload, const u8* data, u32 offset, u32 size, u32* written)
 {
 	struct vmcu *vmcu = fw_upload->dd_handle;
-	u8 buf[36];
-	const u32 bytes = size < 32 ? size : 32;
+	struct i2c_msg xfer[2];
+	u8 buf[37];
+	const u32 remaining = vmcu->fw.file_size - offset;
+	const u32 bytes = remaining > 32 ? 32 : remaining;
 	int r = 0;
 
 	/* We only use half of the provided firmware file */
@@ -830,28 +832,55 @@ static enum fw_upload_err vmcu_fw_write(struct fw_upload* fw_upload, const u8* d
 	}
 
 	/* Prepare buffer */
-	buf[0] = offset & 0xff;
-	buf[1] = (offset >> 8) & 0xff;
-	buf[2] = bytes & 0xff;
-	buf[3] = (bytes >> 8) & 0xff;
-	memcpy(buf, data + offset + vmcu->fw.file_offset, bytes);
+	buf[0] = APPWRITE_REG;
+	buf[1] = offset & 0xff;
+	buf[2] = (offset >> 8) & 0xff;
+	buf[3] = bytes & 0xff;
+	buf[4] = (bytes >> 8) & 0xff;
+	memcpy(buf + 5, data + offset + vmcu->fw.file_offset, bytes);
 
 	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return FW_UPLOAD_ERR_HW_ERROR;
 
 	/* Write */
-	r = i2c_master_send(vmcu->client, buf, bytes + 4);
-	mutex_unlock(&vmcu->mtx);
-	if (r == bytes + 4) {
-		r = FW_UPLOAD_ERR_NONE;
-		*written = bytes;
-	}
-	else {
+	r = i2c_master_send(vmcu->client, buf, bytes + 5);
+	if (r != bytes + 5) {
 		r = FW_UPLOAD_ERR_RW_ERROR;
 		dev_err(&vmcu->client->dev, "failed writing %u bytes to offset %u [%d]\n", bytes, offset, r);
+		goto exit;
 	}
 
+	/* clear receive buffer */
+	memset(buf + 5, 0, bytes);
+
+	/* Read back and validate */
+	buf[0] = APPREAD_REG;
+	xfer[0].addr = vmcu->client->addr;
+	xfer[0].flags = 0;
+	xfer[0].len = 5;
+	xfer[0].buf = buf;
+
+	xfer[1].addr = vmcu->client->addr;
+	xfer[1].flags = I2C_M_RD;
+	xfer[1].len = bytes;
+	xfer[1].buf = buf + 5;
+	r = i2c_transfer(vmcu->client->adapter, xfer, 2);
+	if (r != 2) {
+		r = FW_UPLOAD_ERR_RW_ERROR;
+		dev_err(&vmcu->client->dev, "failed writing %u bytes to offset %u: readback failed [%d]\n", bytes, offset, r);
+		goto exit;
+	}
+	if (memcmp(data + offset + vmcu->fw.file_offset, buf + 5, bytes) != 0) {
+		r = FW_UPLOAD_ERR_RW_ERROR;
+		dev_err(&vmcu->client->dev, "failed writing %u bytes to offset %u: readback not equal\n", bytes, offset);
+		goto exit;
+	}
+
+	*written = bytes;
+	r = FW_UPLOAD_ERR_NONE;
+exit:
+	mutex_unlock(&vmcu->mtx);
 	return r;
 }
 
