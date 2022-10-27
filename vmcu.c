@@ -73,10 +73,17 @@
 #define STATUS_REG				0x20
 #define STATUS_IGNITION1_MASK	BIT(0)
 #define STATUS_IGNITION2_MASK	BIT(0)
-/*
- * WAKECTRL0 -> not volatile
- * WAKECTRL1 -> not volatile
- */
+#define WAKECTRL0_REG				0x21
+#define WAKECTRL0_RTC_MASK			GENMASK(23, 0)
+#define WAKECTRL0_SRC_IGN1_MASK		BIT(26)
+#define WAKECTRL0_SRC_IGN2_MASK		GENMASK(26, 25)
+#define WAKECTRL0_SRC_ACC_MASK		(BIT(24) | BIT(26))
+#define WAKECTRL0_SRC_RTC_MASK		BIT(25)
+#define WAKECTRL1_REG				0x22
+#define WAKECTRL1_DELAY_IGN1_MASK	GENMASK(15, 0)
+#define WAKECTRL1_DELAY_IGN1_SHIFT	0
+#define WAKECTRL1_DELAY_IGN2_MASK	GENMASK(31, 16)
+#define WAKECTRL1_DELAY_IGN2_SHIFT	16
 #define GPIO0_REG				0x30
 #define GPIO0_RESET0_MASK		BIT(0)
 #define GPIO0_RESET1_MASK		BIT(1)
@@ -91,9 +98,11 @@
 #define GPIO0_STATE2_MASK		BIT(18)
 #define GPIO0_STATE3_MASK		BIT(19)
 #define GPIO0_STATESETE_MASK	BIT(31)
-/*
- * GPIOCTRL0 -> not volatile
- */
+#define GPIOCTRL0_REG			0x31
+#define GPIOCTRL0_ALWAYS0_MASK	BIT(0)
+#define GPIOCTRL0_ALWAYS1_MASK	BIT(1)
+#define GPIOCTRL0_ALWAYS2_MASK	BIT(2)
+#define GPIOCTRL0_ALWAYS3_MASK	BIT(3)
 #define APPCTRL_REG				0x70
 #define APPCTRL_PARTITION_MASK	BIT(0)
 #define APPCTRL_A_VALID_MASK	BIT(1)
@@ -135,7 +144,6 @@ static const struct regmap_config vmcu_regmap_config = {
 
 #define LED0_NUM_COLORS	2
 #define ADC_REF_mV 		3300
-#define ADC_BITS 		4096
 
 enum vmcu_fw_part {
 	PART_A,
@@ -941,21 +949,14 @@ exit:
 void vmcu_fw_cancel(struct fw_upload* fw_upload)
 {
 	struct vmcu *vmcu = fw_upload->dd_handle;
-	dev_err(&vmcu->client->dev, "cancel\n");
-}
-
-void vmcu_fw_cleanup(struct fw_upload* fw_upload)
-{
-	struct vmcu *vmcu = fw_upload->dd_handle;
-	dev_err(&vmcu->client->dev, "cleanup\n");
+	dev_info(&vmcu->client->dev, "cancel\n");
 }
 
 static const struct fw_upload_ops vmcu_fw_ops = {
-        .prepare = vmcu_fw_prepare,
-        .write = vmcu_fw_write,
-        .poll_complete = vmcu_fw_poll_complete,
-        .cancel = vmcu_fw_cancel,
-        .cleanup = vmcu_fw_cleanup,
+	.prepare = vmcu_fw_prepare,
+	.write = vmcu_fw_write,
+	.poll_complete = vmcu_fw_poll_complete,
+	.cancel = vmcu_fw_cancel,
 };
 
 static int firmware_register(struct vmcu* vmcu)
@@ -972,6 +973,204 @@ static int firmware_register(struct vmcu* vmcu)
 	vmcu->fw_upload = fwl;
 
 	return 0;
+}
+
+static ssize_t show_version(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t show_gpomode(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
+static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t store_value(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
+
+static DEVICE_ATTR(firmware_version, 0444, show_version, NULL);
+static DEVICE_ATTR(gpo0_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo1_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo2_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo3_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(wake_up_src, 0444, show_wake_up_src, NULL);
+static DEVICE_ATTR(ignition1_delay, 0644, show_value, store_value);
+static DEVICE_ATTR(ignition2_delay, 0644, show_value, store_value);
+static DEVICE_ATTR(rtc_wakeup, 0644, show_value, store_value);
+
+static struct attribute *vmcu_attrs[] = {
+	&dev_attr_firmware_version.attr,
+	&dev_attr_gpo0_mode.attr,
+	&dev_attr_gpo1_mode.attr,
+	&dev_attr_gpo2_mode.attr,
+	&dev_attr_gpo3_mode.attr,
+	&dev_attr_wake_up_src.attr,
+	&dev_attr_ignition1_delay.attr,
+	&dev_attr_ignition2_delay.attr,
+	&dev_attr_rtc_wakeup.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(vmcu);
+
+static ssize_t show_version(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	u32 val = 0;
+	int r = 0;
+
+	r = regmap_read(vmcu->regmap, VERSION_REG, &val);
+	if (r < 0)
+		return r;
+
+	return sprintf(buf, "%u.%u.%u\n",
+			(u32) (val & VERSION_MAJOR_MASK) >> VERSION_MAJOR_SHIFT,
+			(u32) (val & VERSION_MINOR_MASK) >> VERSION_MINOR_SHIFT,
+			(u32) (val & VERSION_PATCH_MASK) >> VERSION_PATCH_SHIFT);
+}
+
+static const char* GPOMODE_ALWAYS_ON = "always_on";
+static const char* GPOMODE_NONE = "none";
+
+static ssize_t show_gpomode(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	u32 val = 0;
+	int r = 0;
+	int always_on = 0;
+
+	r = regmap_read(vmcu->regmap, GPIOCTRL0_REG, &val);
+	if (r < 0)
+		return r;
+
+	if (attr == &dev_attr_gpo0_mode && (val & GPIOCTRL0_ALWAYS0_MASK) == GPIOCTRL0_ALWAYS0_MASK)
+		always_on = 1;
+	if (attr == &dev_attr_gpo1_mode && (val & GPIOCTRL0_ALWAYS1_MASK) == GPIOCTRL0_ALWAYS1_MASK)
+		always_on = 1;
+	if (attr == &dev_attr_gpo2_mode && (val & GPIOCTRL0_ALWAYS2_MASK) == GPIOCTRL0_ALWAYS2_MASK)
+		always_on = 1;
+	if (attr == &dev_attr_gpo3_mode && (val & GPIOCTRL0_ALWAYS3_MASK) == GPIOCTRL0_ALWAYS3_MASK)
+		always_on = 1;
+
+	return sprintf(buf, "%s\n", always_on ? GPOMODE_ALWAYS_ON : GPOMODE_NONE);
+}
+
+static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, const char* buf, size_t count)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	u32 mask = 0;
+	u32 val = 0;
+	int r = 0;
+
+	if (attr == &dev_attr_gpo0_mode)
+		mask = GPIOCTRL0_ALWAYS0_MASK;
+	if (attr == &dev_attr_gpo1_mode)
+		mask = GPIOCTRL0_ALWAYS1_MASK;
+	if (attr == &dev_attr_gpo2_mode)
+		mask = GPIOCTRL0_ALWAYS2_MASK;
+	if (attr == &dev_attr_gpo3_mode)
+		mask = GPIOCTRL0_ALWAYS3_MASK;
+
+	if (strncmp(buf, GPOMODE_ALWAYS_ON, strlen(GPOMODE_ALWAYS_ON)) == 0)
+		val = mask;
+	else if (strncmp(buf, GPOMODE_NONE, strlen(GPOMODE_NONE)) == 0)
+		val = 0;
+	else
+		return -EINVAL;
+
+	r = regmap_write_bits(vmcu->regmap, GPIOCTRL0_REG, mask, val);
+	if (r < 0)
+		return r;
+
+	return count;
+}
+
+static const char* WAKE_UP_SRC_IGN1 = "ignition";
+static const char* WAKE_UP_SRC_IGN2 = "ignition2";
+static const char* WAKE_UP_SRC_ACCEL = "accelerometer";
+static const char* WAKE_UP_SRC_RTC = "rtc";
+static const char* WAKE_UP_SRC_UNKNOWN = "unknown";
+
+static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	u32 val = 0;
+	int r = 0;
+	char *str = (char*) WAKE_UP_SRC_UNKNOWN;
+
+	r = regmap_read(vmcu->regmap, WAKECTRL0_REG, &val);
+	if (r < 0)
+		return r;
+
+	if ((val & WAKECTRL0_SRC_IGN1_MASK) == WAKECTRL0_SRC_IGN1_MASK)
+		str = (char*) WAKE_UP_SRC_IGN1;
+	if ((val & WAKECTRL0_SRC_IGN2_MASK) == WAKECTRL0_SRC_IGN2_MASK)
+		str = (char*) WAKE_UP_SRC_IGN2;
+	if ((val & WAKECTRL0_SRC_ACC_MASK) == WAKECTRL0_SRC_ACC_MASK)
+		str = (char*) WAKE_UP_SRC_ACCEL;
+	if ((val & WAKECTRL0_SRC_RTC_MASK) == WAKECTRL0_SRC_RTC_MASK)
+		str = (char*) WAKE_UP_SRC_RTC;
+
+	return sprintf(buf, "%s\n", str);
+}
+
+static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	u32 val = 0;
+	int r = 0;
+	u32 reg = 0;
+
+	if (attr == &dev_attr_ignition1_delay)
+		reg = WAKECTRL1_REG;
+	if (attr == &dev_attr_ignition2_delay)
+		reg = WAKECTRL1_REG;
+	if (attr == &dev_attr_rtc_wakeup)
+		reg = WAKECTRL0_REG;
+
+	r = regmap_read(vmcu->regmap, reg, &val);
+	if (r < 0)
+		return r;
+
+	if (attr == &dev_attr_ignition1_delay)
+		val = (val & WAKECTRL1_DELAY_IGN1_MASK) >> WAKECTRL1_DELAY_IGN1_SHIFT;
+	if (attr == &dev_attr_ignition2_delay)
+		val = (val & WAKECTRL1_DELAY_IGN2_MASK) >> WAKECTRL1_DELAY_IGN2_SHIFT;
+	if (attr == &dev_attr_rtc_wakeup)
+		val = (val & WAKECTRL0_RTC_MASK);
+
+	return sprintf(buf, "%u\n", val);
+}
+
+static ssize_t store_value(struct device* dev, struct device_attribute* attr, const char* buf, size_t count)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	unsigned long val = 0;
+	u32 mask = 0;
+	u32 shift = 0;
+	int r = 0;
+	u32 reg = 0;
+
+	if (kstrtoul(buf, 0, &val) != 0)
+		return -EINVAL;
+
+	if (attr == &dev_attr_ignition1_delay) {
+		reg = WAKECTRL1_REG;
+		mask = WAKECTRL1_DELAY_IGN1_MASK;
+		shift = WAKECTRL1_DELAY_IGN1_SHIFT;
+	}
+	if (attr == &dev_attr_ignition2_delay) {
+		reg = WAKECTRL1_REG;
+		mask = WAKECTRL1_DELAY_IGN2_MASK;
+		shift = WAKECTRL1_DELAY_IGN2_SHIFT;
+	}
+	if (attr == &dev_attr_rtc_wakeup) {
+		reg = WAKECTRL0_REG;
+		mask = WAKECTRL0_RTC_MASK;
+		shift = 0;
+	}
+
+	if (val > (mask >> shift))
+		return -EINVAL;
+
+	r = regmap_write_bits(vmcu->regmap, reg, mask, ((u32) val) << shift);
+	if (r < 0)
+		return r;
+
+	return count;
 }
 
 static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
@@ -1061,6 +1260,7 @@ static struct i2c_driver vmcu_driver = {
 		.owner = THIS_MODULE,
 		.name = "vmcu",
 		.of_match_table = of_vmcu_match,
+		.dev_groups = vmcu_groups,
 	},
 	.id_table = vmcu_id,
 	.probe = vmcu_probe,
