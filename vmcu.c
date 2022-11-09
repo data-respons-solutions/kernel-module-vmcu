@@ -30,6 +30,8 @@
 #include <linux/iio/iio.h>
 #include <linux/gpio/driver.h>
 #include <linux/firmware.h>
+#include <linux/of_irq.h>
+#include <linux/sysrq.h>
 
 #define MAGIC_REG				0x0
 #define MAGIC_VALUE				0x0ec70add
@@ -1173,9 +1175,31 @@ static ssize_t store_value(struct device* dev, struct device_attribute* attr, co
 	return count;
 }
 
+static irqreturn_t vmcu_shutdown_irq(int irq, void *private)
+{
+	/* When receiving this interrupt the main power
+	 * has been lost and system should:
+	 *  1. Protect flash storage
+	 *  2. Shutdown
+	 *
+	 * It's not possible to recover without a shutdown as the vmcu can't
+	 * detect a reboot. We will be powered on again once a wake up event
+	 * is available.
+	 */
+	struct vmcu *vmcu = private;
+	/* Remount all ro and drop write cache */
+	handle_sysrq('u');
+	dev_err(&vmcu->client->dev, "Power failure!\n");
+	/* Kill init daemon and force shutdown */
+	kill_cad_pid(SIGINT, 1);
+
+	return IRQ_HANDLED;
+}
+
 static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 {
 	struct vmcu *vmcu = NULL;
+	unsigned long irqtype = 0;
 	u32 val = 0;
 	int r = 0;
 
@@ -1235,6 +1259,22 @@ static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 	r = firmware_register(vmcu);
 	if (r < 0)
 		return r;
+
+	// interrupts
+	r = of_irq_get_byname(client->dev.of_node, "shutdown");
+	if (r > 0) {
+		dev_info(&client->dev, "Enabling shutdown interrupt\n");
+		if (sysrq_mask() != 1 && (sysrq_mask() & SYSRQ_ENABLE_REMOUNT) != SYSRQ_ENABLE_REMOUNT) {
+			dev_err(&client->dev, "sysrq enable_remount not enabled, mask: %d\n", sysrq_mask());
+			return -ENOSYS;
+		}
+		irqtype = irqd_get_trigger_type(irq_get_irq_data(r));
+		r = devm_request_threaded_irq(&client->dev, r, NULL, vmcu_shutdown_irq, irqtype | IRQF_ONESHOT, "vmcu", vmcu);
+		if (r < 0) {
+			dev_err(&client->dev, "Failed requesting interrupt: %d\n", r);
+			return r;
+		}
+	}
 
 	return 0;
 }
