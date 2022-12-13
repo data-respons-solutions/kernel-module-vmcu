@@ -16,6 +16,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <linux/device.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -171,6 +172,7 @@ struct vmcu {
 	struct gpio_chip		gpio;
 	struct fw_upload		*fw_upload;
 	struct vmcu_fw			fw;
+	struct device			*root_dev;
 };
 
 static int rtc_set(struct device *dev, struct rtc_time *rtctime)
@@ -1276,6 +1278,18 @@ static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 		}
 	}
 
+	/* Create sysfs symlink to system_config device */
+	vmcu->root_dev = root_device_register("board");
+	if (IS_ERR(vmcu->root_dev)) {
+		dev_err(&client->dev, "Failed registering root device \"board\" [%ld]\n", PTR_ERR(vmcu->root_dev));
+		r = PTR_ERR(vmcu->root_dev);
+	}
+	else {
+		r = sysfs_create_link(&vmcu->root_dev->kobj, &client->dev.kobj, "smc");
+		if (r)
+			dev_err(&client->dev, "Failed linking to \"board\" [%d]\n", r);
+	}
+
 	return 0;
 }
 
@@ -1285,6 +1299,8 @@ static int vmcu_remove(struct i2c_client* client)
 
 	if (vmcu->fw_upload)
 		firmware_upload_unregister(vmcu->fw_upload);
+
+	root_device_unregister(vmcu->root_dev);
 
 	return 0;
 }
