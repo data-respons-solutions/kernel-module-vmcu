@@ -1246,6 +1246,14 @@ static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 	r = led0_register(vmcu);
 	if (r < 0)
 		return r;
+	/* Disable led0 if active across reboot cycle.
+	*  vmcu will disable led0 when powered off but can't
+	*  detect reboot.
+	*/
+	r = regmap_update_bits(vmcu->regmap, LED0_REG,
+				LED0_GREEN_MASK | LED0_RED_MASK | LED0_BLINK_MASK, 0);
+	if (r)
+		dev_err(&client->dev, "Failed disabling led0: %d\n", r);
 
 	// adc
 	r = adc_register(vmcu);
