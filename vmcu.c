@@ -1193,7 +1193,8 @@ static irqreturn_t vmcu_shutdown_irq(int irq, void *private)
 	handle_sysrq('u');
 	dev_err(&vmcu->client->dev, "Power failure!\n");
 	/* Kill init daemon and force shutdown */
-	kill_cad_pid(SIGINT, 1);
+	/* SIGRTMIN+4 (38) triggers shutdown for systemd */
+	kill_cad_pid(38, 1);
 
 	return IRQ_HANDLED;
 }
