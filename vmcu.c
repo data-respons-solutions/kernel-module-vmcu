@@ -538,10 +538,6 @@ static void vmcu_gpio_set_multiple(struct gpio_chip* chip, unsigned long* mask, 
 	int r = 0;
 	uint32_t data = 0;
 
-	r = mutex_lock_interruptible(&vmcu->mtx);
-	if (r)
-		return;
-
 	if ((*mask & BIT(2)) == BIT(2))
 		data |=	(*bits & BIT(2)) == BIT(2) ? GPIO0_SET0_MASK : GPIO0_RESET0_MASK;
 	if ((*mask & BIT(3)) == BIT(3))
@@ -551,10 +547,13 @@ static void vmcu_gpio_set_multiple(struct gpio_chip* chip, unsigned long* mask, 
 	if ((*mask & BIT(5)) == BIT(5))
 		data |=	(*bits & BIT(5)) == BIT(5) ? GPIO0_SET3_MASK : GPIO0_RESET3_MASK;
 
-	if (data != 0)
+	if (data != 0) {
+		r = mutex_lock_interruptible(&vmcu->mtx);
+		if (r)
+			return;
 		regmap_write(vmcu->regmap, GPIO0_REG, data);
-
-	mutex_unlock(&vmcu->mtx);
+		mutex_unlock(&vmcu->mtx);
+	}
 }
 
 static void vmcu_gpio_set(struct gpio_chip* chip, unsigned int offset, int value)
@@ -1016,7 +1015,12 @@ static ssize_t show_version(struct device* dev, struct device_attribute* attr, c
 	u32 val = 0;
 	int r = 0;
 
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
 	r = regmap_read(vmcu->regmap, VERSION_REG, &val);
+	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
 
@@ -1036,7 +1040,12 @@ static ssize_t show_gpomode(struct device* dev, struct device_attribute* attr, c
 	int r = 0;
 	int always_on = 0;
 
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
 	r = regmap_read(vmcu->regmap, GPIOCTRL0_REG, &val);
+	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
 
@@ -1075,7 +1084,12 @@ static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, 
 	else
 		return -EINVAL;
 
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
 	r = regmap_write_bits(vmcu->regmap, GPIOCTRL0_REG, mask, val);
+	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
 
@@ -1095,7 +1109,12 @@ static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* att
 	int r = 0;
 	char *str = (char*) WAKE_UP_SRC_UNKNOWN;
 
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
 	r = regmap_read(vmcu->regmap, WAKECTRL0_REG, &val);
+	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
 
@@ -1125,7 +1144,12 @@ static ssize_t show_value(struct device* dev, struct device_attribute* attr, cha
 	if (attr == &dev_attr_rtc_wakeup)
 		reg = WAKECTRL0_REG;
 
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
 	r = regmap_read(vmcu->regmap, reg, &val);
+	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
 
@@ -1170,7 +1194,12 @@ static ssize_t store_value(struct device* dev, struct device_attribute* attr, co
 	if (val > (mask >> shift))
 		return -EINVAL;
 
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
 	r = regmap_write_bits(vmcu->regmap, reg, mask, ((u32) val) << shift);
+	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
 
