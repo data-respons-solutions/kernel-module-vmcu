@@ -987,10 +987,10 @@ static ssize_t show_value(struct device* dev, struct device_attribute* attr, cha
 static ssize_t store_value(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 
 static DEVICE_ATTR(firmware_version, 0444, show_version, NULL);
-static DEVICE_ATTR(gpo0_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo1_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo2_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo3_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo4_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(wake_up_src, 0444, show_wake_up_src, NULL);
 static DEVICE_ATTR(ignition1_delay, 0644, show_value, store_value);
 static DEVICE_ATTR(ignition2_delay, 0644, show_value, store_value);
@@ -998,10 +998,10 @@ static DEVICE_ATTR(rtc_wakeup, 0644, show_value, store_value);
 
 static struct attribute *vmcu_attrs[] = {
 	&dev_attr_firmware_version.attr,
-	&dev_attr_gpo0_mode.attr,
 	&dev_attr_gpo1_mode.attr,
 	&dev_attr_gpo2_mode.attr,
 	&dev_attr_gpo3_mode.attr,
+	&dev_attr_gpo4_mode.attr,
 	&dev_attr_wake_up_src.attr,
 	&dev_attr_ignition1_delay.attr,
 	&dev_attr_ignition2_delay.attr,
@@ -1040,13 +1040,13 @@ static ssize_t show_gpomode(struct device* dev, struct device_attribute* attr, c
 	if (r < 0)
 		return r;
 
-	if (attr == &dev_attr_gpo0_mode && (val & GPIOCTRL0_ALWAYS0_MASK) == GPIOCTRL0_ALWAYS0_MASK)
+	if (attr == &dev_attr_gpo1_mode && (val & GPIOCTRL0_ALWAYS0_MASK) == GPIOCTRL0_ALWAYS0_MASK)
 		always_on = 1;
-	if (attr == &dev_attr_gpo1_mode && (val & GPIOCTRL0_ALWAYS1_MASK) == GPIOCTRL0_ALWAYS1_MASK)
+	if (attr == &dev_attr_gpo2_mode && (val & GPIOCTRL0_ALWAYS1_MASK) == GPIOCTRL0_ALWAYS1_MASK)
 		always_on = 1;
-	if (attr == &dev_attr_gpo2_mode && (val & GPIOCTRL0_ALWAYS2_MASK) == GPIOCTRL0_ALWAYS2_MASK)
+	if (attr == &dev_attr_gpo3_mode && (val & GPIOCTRL0_ALWAYS2_MASK) == GPIOCTRL0_ALWAYS2_MASK)
 		always_on = 1;
-	if (attr == &dev_attr_gpo3_mode && (val & GPIOCTRL0_ALWAYS3_MASK) == GPIOCTRL0_ALWAYS3_MASK)
+	if (attr == &dev_attr_gpo4_mode && (val & GPIOCTRL0_ALWAYS3_MASK) == GPIOCTRL0_ALWAYS3_MASK)
 		always_on = 1;
 
 	return sprintf(buf, "%s\n", always_on ? GPOMODE_ALWAYS_ON : GPOMODE_NONE);
@@ -1059,13 +1059,13 @@ static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, 
 	u32 val = 0;
 	int r = 0;
 
-	if (attr == &dev_attr_gpo0_mode)
-		mask = GPIOCTRL0_ALWAYS0_MASK;
 	if (attr == &dev_attr_gpo1_mode)
-		mask = GPIOCTRL0_ALWAYS1_MASK;
+		mask = GPIOCTRL0_ALWAYS0_MASK;
 	if (attr == &dev_attr_gpo2_mode)
-		mask = GPIOCTRL0_ALWAYS2_MASK;
+		mask = GPIOCTRL0_ALWAYS1_MASK;
 	if (attr == &dev_attr_gpo3_mode)
+		mask = GPIOCTRL0_ALWAYS2_MASK;
+	if (attr == &dev_attr_gpo4_mode)
 		mask = GPIOCTRL0_ALWAYS3_MASK;
 
 	if (strncmp(buf, GPOMODE_ALWAYS_ON, strlen(GPOMODE_ALWAYS_ON)) == 0)
