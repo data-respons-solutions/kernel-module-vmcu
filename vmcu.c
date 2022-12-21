@@ -1225,6 +1225,9 @@ static irqreturn_t vmcu_shutdown_irq(int irq, void *private)
 	/* SIGRTMIN+4 (38) triggers shutdown for systemd */
 	kill_cad_pid(38, 1);
 
+	/* Can't clear interrupt -- disable handler */
+	disable_irq_nosync(irq);
+
 	return IRQ_HANDLED;
 }
 
@@ -1308,6 +1311,7 @@ static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 			dev_err(&client->dev, "sysrq enable_remount not enabled, mask: %d\n", sysrq_mask());
 			return -ENOSYS;
 		}
+
 		irqtype = irqd_get_trigger_type(irq_get_irq_data(r));
 		r = devm_request_threaded_irq(&client->dev, r, NULL, vmcu_shutdown_irq, irqtype | IRQF_ONESHOT, "vmcu", vmcu);
 		if (r < 0) {
