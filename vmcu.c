@@ -795,7 +795,7 @@ static enum fw_upload_err vmcu_fw_prepare(struct fw_upload* fw_upload, const u8*
 
 	/* Update already ongoing if current partition not valid */
 	if (!vmcu_fw_valid(val, vmcu->fw.part)) {
-		dev_err(&vmcu->client->dev, "Update already ongoing -- aborting\n");
+		dev_err(&vmcu->client->dev, "Update already ongoing, shutdown (not reboot!) to finalize -- aborting\n");
 		r = FW_UPLOAD_ERR_HW_ERROR;
 		goto exit;
 	}
