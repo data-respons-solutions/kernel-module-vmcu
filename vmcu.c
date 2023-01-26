@@ -78,6 +78,7 @@
 #define STATUS_IGNITION2_MASK	BIT(0)
 #define WAKECTRL0_REG				0x21
 #define WAKECTRL0_RTC_MASK			GENMASK(23, 0)
+#define WAKECTRL0_SRC_MASK			GENMASK(26, 24)
 #define WAKECTRL0_SRC_IGN1_MASK		BIT(26)
 #define WAKECTRL0_SRC_IGN2_MASK		GENMASK(26, 25)
 #define WAKECTRL0_SRC_ACC_MASK		(BIT(24) | BIT(26))
@@ -1118,13 +1119,13 @@ static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* att
 	if (r < 0)
 		return r;
 
-	if ((val & WAKECTRL0_SRC_IGN1_MASK) == WAKECTRL0_SRC_IGN1_MASK)
+	if ((val & WAKECTRL0_SRC_MASK) == WAKECTRL0_SRC_IGN1_MASK)
 		str = (char*) WAKE_UP_SRC_IGN1;
-	if ((val & WAKECTRL0_SRC_IGN2_MASK) == WAKECTRL0_SRC_IGN2_MASK)
+	if ((val & WAKECTRL0_SRC_MASK) == WAKECTRL0_SRC_IGN2_MASK)
 		str = (char*) WAKE_UP_SRC_IGN2;
-	if ((val & WAKECTRL0_SRC_ACC_MASK) == WAKECTRL0_SRC_ACC_MASK)
+	if ((val & WAKECTRL0_SRC_MASK) == WAKECTRL0_SRC_ACC_MASK)
 		str = (char*) WAKE_UP_SRC_ACCEL;
-	if ((val & WAKECTRL0_SRC_RTC_MASK) == WAKECTRL0_SRC_RTC_MASK)
+	if ((val & WAKECTRL0_SRC_MASK) == WAKECTRL0_SRC_RTC_MASK)
 		str = (char*) WAKE_UP_SRC_RTC;
 
 	return sprintf(buf, "%s\n", str);
