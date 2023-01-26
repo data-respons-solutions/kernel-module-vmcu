@@ -123,6 +123,8 @@
 #define APPCTRL_ALIGNMENT_SHIFT	24
 #define APPWRITE_REG			0x75
 #define APPREAD_REG				0x76
+#define FACTORY_REG				0xf0
+#define FACTORY_POWER_OVERRIDE_MASK BIT(0)
 
 static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(RTC_TIME_REG, RTC_DATE_REG),
@@ -131,6 +133,7 @@ static const struct regmap_range volatile_ranges[] = {
 	regmap_reg_range(STATUS_REG, STATUS_REG),
 	regmap_reg_range(GPIO0_REG, GPIO0_REG),
 	regmap_reg_range(APPCTRL_REG, APPCTRL_REG),
+	regmap_reg_range(FACTORY_REG, FACTORY_REG),
 };
 
 static const struct regmap_access_table volatile_access_table = {
@@ -985,6 +988,7 @@ static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, 
 static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t store_value(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
+static ssize_t store_factory(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 
 static DEVICE_ATTR(firmware_version, 0444, show_version, NULL);
 static DEVICE_ATTR(gpo1_mode, 0664, show_gpomode, store_gpomode);
@@ -995,6 +999,7 @@ static DEVICE_ATTR(wake_up_src, 0444, show_wake_up_src, NULL);
 static DEVICE_ATTR(ignition1_delay, 0644, show_value, store_value);
 static DEVICE_ATTR(ignition2_delay, 0644, show_value, store_value);
 static DEVICE_ATTR(rtc_wakeup, 0644, show_value, store_value);
+static DEVICE_ATTR(factory, 0220, NULL, store_factory);
 
 static struct attribute *vmcu_attrs[] = {
 	&dev_attr_firmware_version.attr,
@@ -1006,6 +1011,7 @@ static struct attribute *vmcu_attrs[] = {
 	&dev_attr_ignition1_delay.attr,
 	&dev_attr_ignition2_delay.attr,
 	&dev_attr_rtc_wakeup.attr,
+	&dev_attr_factory.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(vmcu);
@@ -1200,6 +1206,35 @@ static ssize_t store_value(struct device* dev, struct device_attribute* attr, co
 		return r;
 
 	r = regmap_write_bits(vmcu->regmap, reg, mask, ((u32) val) << shift);
+	mutex_unlock(&vmcu->mtx);
+	if (r < 0)
+		return r;
+
+	return count;
+}
+
+static const char* FACTORY_POWER_OVERRIDE = "power_override";
+
+static ssize_t store_factory(struct device* dev, struct device_attribute* attr, const char* buf, size_t count)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	u32 mask = 0;
+	u32 val = 0;
+	int r = 0;
+
+	if (strncmp(buf, FACTORY_POWER_OVERRIDE, strlen(FACTORY_POWER_OVERRIDE)) == 0) {
+		val |= FACTORY_POWER_OVERRIDE_MASK;
+		mask |= FACTORY_POWER_OVERRIDE_MASK;
+	}
+	else {
+		return -EINVAL;
+	}
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	r = regmap_write_bits(vmcu->regmap, FACTORY_REG, mask, val);
 	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
