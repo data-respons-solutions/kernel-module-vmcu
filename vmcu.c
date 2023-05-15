@@ -1371,7 +1371,7 @@ static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 	return 0;
 }
 
-static int vmcu_remove(struct i2c_client* client)
+static void vmcu_remove(struct i2c_client* client)
 {
 	struct vmcu *vmcu = i2c_get_clientdata(client);
 
@@ -1379,8 +1379,6 @@ static int vmcu_remove(struct i2c_client* client)
 		firmware_upload_unregister(vmcu->fw_upload);
 
 	root_device_unregister(vmcu->root_dev);
-
-	return 0;
 }
 
 static const struct of_device_id of_vmcu_match[] = { { .compatible =
