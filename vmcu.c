@@ -107,6 +107,19 @@
 #define GPIOCTRL0_ALWAYS1_MASK	BIT(1)
 #define GPIOCTRL0_ALWAYS2_MASK	BIT(2)
 #define GPIOCTRL0_ALWAYS3_MASK	BIT(3)
+#define IMUCTRL_REG					0x50
+#define IMUCTRL_WAKEUP_ENABLE_MASK	BIT(0)
+#define IMUCTRL_FILTER_MASK			BIT(1)
+#define IMUCTRL_FILTER_SLOPE_MASK	0
+#define IMUCTRL_FILTER_HP_MASK		BIT(1)
+#define IMUWAKE0_REG				0x51
+#define IMUWAKE0_ODR_MASK			GENMASK(3,0)
+#define IMUWAKE0_SCALE_MASK			GENMASK(9,8)
+#define IMUWAKE0_SCALE_SHIFT		8
+#define IMUWAKE1_REG				0x52
+#define IMUWAKE1_THRESH_MASK		GENMASK(5,0)
+#define IMUWAKE1_DURATION_MASK		GENMASK(17, 16)
+#define IMUWAKE1_DURATION_SHIFT		16
 #define APPCTRL_REG				0x70
 #define APPCTRL_PARTITION_MASK	BIT(0)
 #define APPCTRL_A_VALID_MASK	BIT(1)
@@ -989,6 +1002,8 @@ static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* att
 static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t store_value(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 static ssize_t store_factory(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
+static ssize_t show_imu_wake_filter(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t store_imu_wake_filter(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 
 static DEVICE_ATTR(firmware_version, 0444, show_version, NULL);
 static DEVICE_ATTR(gpo1_mode, 0664, show_gpomode, store_gpomode);
@@ -1000,6 +1015,12 @@ static DEVICE_ATTR(ignition1_delay, 0644, show_value, store_value);
 static DEVICE_ATTR(ignition2_delay, 0644, show_value, store_value);
 static DEVICE_ATTR(rtc_wakeup, 0644, show_value, store_value);
 static DEVICE_ATTR(factory, 0220, NULL, store_factory);
+static DEVICE_ATTR(imu_wake_enable, 0644, show_value, store_value);
+static DEVICE_ATTR(imu_wake_filter, 0644, show_imu_wake_filter, store_imu_wake_filter);
+static DEVICE_ATTR(imu_wake_odr, 0644, show_value, store_value);
+static DEVICE_ATTR(imu_wake_scale, 0644, show_value, store_value);
+static DEVICE_ATTR(imu_wake_thresh, 0644, show_value, store_value);
+static DEVICE_ATTR(imu_wake_duration, 0644, show_value, store_value);
 
 static struct attribute *vmcu_attrs[] = {
 	&dev_attr_firmware_version.attr,
@@ -1012,6 +1033,12 @@ static struct attribute *vmcu_attrs[] = {
 	&dev_attr_ignition2_delay.attr,
 	&dev_attr_rtc_wakeup.attr,
 	&dev_attr_factory.attr,
+	&dev_attr_imu_wake_enable.attr,
+	&dev_attr_imu_wake_filter.attr,
+	&dev_attr_imu_wake_odr.attr,
+	&dev_attr_imu_wake_scale.attr,
+	&dev_attr_imu_wake_thresh.attr,
+	&dev_attr_imu_wake_duration.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(vmcu);
@@ -1150,6 +1177,16 @@ static ssize_t show_value(struct device* dev, struct device_attribute* attr, cha
 		reg = WAKECTRL1_REG;
 	if (attr == &dev_attr_rtc_wakeup)
 		reg = WAKECTRL0_REG;
+	if (attr == &dev_attr_imu_wake_enable)
+		reg = IMUCTRL_REG;
+	if (attr == &dev_attr_imu_wake_odr)
+		reg = IMUWAKE0_REG;
+	if (attr == &dev_attr_imu_wake_scale)
+		reg = IMUWAKE0_REG;
+	if (attr == &dev_attr_imu_wake_thresh)
+		reg = IMUWAKE1_REG;
+	if (attr == &dev_attr_imu_wake_duration)
+		reg = IMUWAKE1_REG;
 
 	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
@@ -1166,6 +1203,16 @@ static ssize_t show_value(struct device* dev, struct device_attribute* attr, cha
 		val = (val & WAKECTRL1_DELAY_IGN2_MASK) >> WAKECTRL1_DELAY_IGN2_SHIFT;
 	if (attr == &dev_attr_rtc_wakeup)
 		val = (val & WAKECTRL0_RTC_MASK);
+	if (attr == &dev_attr_imu_wake_enable)
+		val = (val & IMUCTRL_WAKEUP_ENABLE_MASK);
+	if (attr == &dev_attr_imu_wake_odr)
+		val = (val & IMUWAKE0_ODR_MASK);
+	if (attr == &dev_attr_imu_wake_scale)
+		val = (val & IMUWAKE0_SCALE_MASK) >> IMUWAKE0_SCALE_SHIFT;
+	if (attr == &dev_attr_imu_wake_thresh)
+		val = (val & IMUWAKE1_THRESH_MASK);
+	if (attr == &dev_attr_imu_wake_duration)
+		val = (val & IMUWAKE1_DURATION_MASK) >> IMUWAKE1_DURATION_SHIFT;
 
 	return sprintf(buf, "%u\n", val);
 }
@@ -1196,6 +1243,31 @@ static ssize_t store_value(struct device* dev, struct device_attribute* attr, co
 		reg = WAKECTRL0_REG;
 		mask = WAKECTRL0_RTC_MASK;
 		shift = 0;
+	}
+	if (attr == &dev_attr_imu_wake_enable) {
+		reg = IMUCTRL_REG;
+		mask = IMUCTRL_WAKEUP_ENABLE_MASK;
+		shift = 0;
+	}
+	if (attr == &dev_attr_imu_wake_odr) {
+		reg = IMUWAKE0_REG;
+		mask = IMUWAKE0_ODR_MASK;
+		shift = 0;
+	}
+	if (attr == &dev_attr_imu_wake_scale) {
+		reg = IMUWAKE0_REG;
+		mask = IMUWAKE0_SCALE_MASK;
+		shift = IMUWAKE0_SCALE_SHIFT;
+	}
+	if (attr == &dev_attr_imu_wake_thresh) {
+		reg = IMUWAKE1_REG;
+		mask = IMUWAKE1_THRESH_MASK;
+		shift = 0;
+	}
+	if (attr == &dev_attr_imu_wake_duration) {
+		reg = IMUWAKE1_REG;
+		mask = IMUWAKE1_DURATION_MASK;
+		shift = IMUWAKE1_DURATION_SHIFT;
 	}
 
 	if (val > (mask >> shift))
@@ -1235,6 +1307,58 @@ static ssize_t store_factory(struct device* dev, struct device_attribute* attr, 
 		return r;
 
 	r = regmap_write_bits(vmcu->regmap, FACTORY_REG, mask, val);
+	mutex_unlock(&vmcu->mtx);
+	if (r < 0)
+		return r;
+
+	return count;
+}
+
+static const char* IMU_WAKE_FILTER_SLOPE = "slope";
+static const char* IMU_WAKE_FILTER_HP = "high-pass";
+static ssize_t show_imu_wake_filter(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	uint32_t val = 0;
+	int r = 0;
+	char* str = NULL;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	r = regmap_read(vmcu->regmap, IMUCTRL_REG, &val);
+	mutex_unlock(&vmcu->mtx);
+	if (r < 0)
+		return r;
+
+	if ((val & IMUCTRL_FILTER_MASK) == IMUCTRL_FILTER_SLOPE_MASK)
+		str = (char*) IMU_WAKE_FILTER_SLOPE;
+	if ((val & IMUCTRL_FILTER_MASK) == IMUCTRL_FILTER_HP_MASK)
+		str = (char*) IMU_WAKE_FILTER_HP;
+
+	return sprintf(buf, "%s\n", str);
+}
+
+static ssize_t store_imu_wake_filter(struct device* dev, struct device_attribute* attr, const char* buf, size_t count)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	uint32_t val = 0;
+	int r = 0;
+
+	if (strncmp(buf, IMU_WAKE_FILTER_SLOPE, strlen(IMU_WAKE_FILTER_SLOPE)) == 0)
+		val = IMUCTRL_FILTER_SLOPE_MASK;
+	else if (strncmp(buf, IMU_WAKE_FILTER_HP, strlen(IMU_WAKE_FILTER_HP)) == 0)
+		val = IMUCTRL_FILTER_HP_MASK;
+	else
+		return -EINVAL;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	r = regmap_update_bits(vmcu->regmap, IMUCTRL_REG,
+				IMUCTRL_FILTER_MASK, val);
 	mutex_unlock(&vmcu->mtx);
 	if (r < 0)
 		return r;
