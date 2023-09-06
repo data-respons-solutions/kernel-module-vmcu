@@ -73,6 +73,10 @@
 #define ADC2_REG				0x14
 #define ADC3_REG				0x15
 #define ADC4_REG				0x16
+#define ADC5_REG				0x17
+#define ADC6_REG				0x18
+#define ADC7_REG				0x19
+#define ADC8_REG				0x1a
 #define STATUS_REG				0x20
 #define STATUS_IGNITION1_MASK	BIT(0)
 #define STATUS_IGNITION2_MASK	BIT(0)
@@ -93,20 +97,36 @@
 #define GPIO0_RESET1_MASK		BIT(1)
 #define GPIO0_RESET2_MASK		BIT(2)
 #define GPIO0_RESET3_MASK		BIT(3)
+#define GPIO0_RESET4_MASK		BIT(4)
+#define GPIO0_RESET5_MASK		BIT(5)
+#define GPIO0_RESET6_MASK		BIT(6)
+#define GPIO0_RESET7_MASK		BIT(7)
 #define GPIO0_SET0_MASK			BIT(8)
 #define GPIO0_SET1_MASK			BIT(9)
 #define GPIO0_SET2_MASK			BIT(10)
 #define GPIO0_SET3_MASK			BIT(11)
+#define GPIO0_SET4_MASK			BIT(12)
+#define GPIO0_SET5_MASK			BIT(13)
+#define GPIO0_SET6_MASK			BIT(14)
+#define GPIO0_SET7_MASK			BIT(15)
 #define GPIO0_STATE0_MASK		BIT(16)
 #define GPIO0_STATE1_MASK		BIT(17)
 #define GPIO0_STATE2_MASK		BIT(18)
 #define GPIO0_STATE3_MASK		BIT(19)
+#define GPIO0_STATE4_MASK		BIT(20)
+#define GPIO0_STATE5_MASK		BIT(21)
+#define GPIO0_STATE6_MASK		BIT(22)
+#define GPIO0_STATE7_MASK		BIT(23)
 #define GPIO0_STATESETE_MASK	BIT(31)
 #define GPIOCTRL0_REG			0x31
 #define GPIOCTRL0_ALWAYS0_MASK	BIT(0)
 #define GPIOCTRL0_ALWAYS1_MASK	BIT(1)
 #define GPIOCTRL0_ALWAYS2_MASK	BIT(2)
 #define GPIOCTRL0_ALWAYS3_MASK	BIT(3)
+#define GPIOCTRL0_ALWAYS4_MASK	BIT(4)
+#define GPIOCTRL0_ALWAYS5_MASK	BIT(5)
+#define GPIOCTRL0_ALWAYS6_MASK	BIT(6)
+#define GPIOCTRL0_ALWAYS7_MASK	BIT(7)
 #define IMUCTRL_REG					0x50
 #define IMUCTRL_WAKEUP_ENABLE_MASK	BIT(0)
 #define IMUCTRL_FILTER_MASK			BIT(1)
@@ -439,11 +459,43 @@ static const struct iio_chan_spec vmcu_iio_channels[] = {
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.address = ADC5_REG,
+		.extend_name = "adc5",
+	},
+	{
+		.channel = 6,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.address = ADC6_REG,
+		.extend_name = "adc6",
+	},
+	{
+		.channel = 7,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.address = ADC7_REG,
+		.extend_name = "adc7",
+	},
+	{
+		.channel = 8,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.address = ADC8_REG,
+		.extend_name = "adc8",
+	},
+	{
+		.channel = 9,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
 		.address = ADC_VBAT_REG,
 		.extend_name = "vbat",
 	},
 	{
-		.channel = 6,
+		.channel = 10,
 		.type = IIO_TEMP,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
 		.address = SENSOR_REG,
@@ -489,6 +541,10 @@ static int vmcu_gpio_get_direction(struct gpio_chip* chip, unsigned int offset)
 	case 3:
 	case 4:
 	case 5:
+	case 6:
+	case 7:
+	case 8:
+	case 9:
 		return GPIO_LINE_DIRECTION_OUT;
 	default:
 		return -ENODEV;
@@ -501,7 +557,7 @@ static int vmcu_gpio_get_multiple(struct gpio_chip* chip, unsigned long* mask, u
 	int r = 0;
 	uint32_t data = 0;
 	const uint32_t status_mask = GENMASK(1, 0);
-	const uint32_t gpio_mask = GENMASK(5, 2);
+	const uint32_t gpio_mask = GENMASK(9, 2);
 
 	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
@@ -529,6 +585,14 @@ static int vmcu_gpio_get_multiple(struct gpio_chip* chip, unsigned long* mask, u
 			*bits |= BIT(4);
 		if ((data & GPIO0_STATE3_MASK) == GPIO0_STATE3_MASK)
 			*bits |= BIT(5);
+		if ((data & GPIO0_STATE4_MASK) == GPIO0_STATE4_MASK)
+			*bits |= BIT(6);
+		if ((data & GPIO0_STATE5_MASK) == GPIO0_STATE5_MASK)
+			*bits |= BIT(7);
+		if ((data & GPIO0_STATE6_MASK) == GPIO0_STATE6_MASK)
+			*bits |= BIT(8);
+		if ((data & GPIO0_STATE7_MASK) == GPIO0_STATE7_MASK)
+			*bits |= BIT(9);
 	}
 
 exit:
@@ -563,6 +627,14 @@ static void vmcu_gpio_set_multiple(struct gpio_chip* chip, unsigned long* mask, 
 		data |=	(*bits & BIT(4)) == BIT(4) ? GPIO0_SET2_MASK : GPIO0_RESET2_MASK;
 	if ((*mask & BIT(5)) == BIT(5))
 		data |=	(*bits & BIT(5)) == BIT(5) ? GPIO0_SET3_MASK : GPIO0_RESET3_MASK;
+	if ((*mask & BIT(6)) == BIT(6))
+		data |=	(*bits & BIT(6)) == BIT(6) ? GPIO0_SET4_MASK : GPIO0_RESET4_MASK;
+	if ((*mask & BIT(7)) == BIT(7))
+		data |=	(*bits & BIT(7)) == BIT(7) ? GPIO0_SET5_MASK : GPIO0_RESET5_MASK;
+	if ((*mask & BIT(8)) == BIT(8))
+		data |=	(*bits & BIT(8)) == BIT(8) ? GPIO0_SET6_MASK : GPIO0_RESET6_MASK;
+	if ((*mask & BIT(9)) == BIT(9))
+		data |=	(*bits & BIT(9)) == BIT(9) ? GPIO0_SET7_MASK : GPIO0_RESET7_MASK;
 
 	if (data != 0) {
 		r = mutex_lock_interruptible(&vmcu->mtx);
@@ -592,7 +664,7 @@ static int gpio_register(struct vmcu *vmcu)
 	vmcu->gpio.get = vmcu_gpio_get;
 	vmcu->gpio.set_multiple = vmcu_gpio_set_multiple;
 	vmcu->gpio.set = vmcu_gpio_set;
-	vmcu->gpio.ngpio = 6;
+	vmcu->gpio.ngpio = 10;
 	vmcu->gpio.base = -1;
 	vmcu->gpio.can_sleep = true;
 
@@ -1010,6 +1082,10 @@ static DEVICE_ATTR(gpo1_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo2_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo3_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo4_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo5_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo6_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo7_mode, 0664, show_gpomode, store_gpomode);
+static DEVICE_ATTR(gpo8_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(wake_up_src, 0444, show_wake_up_src, NULL);
 static DEVICE_ATTR(ignition1_delay, 0644, show_value, store_value);
 static DEVICE_ATTR(ignition2_delay, 0644, show_value, store_value);
@@ -1028,6 +1104,10 @@ static struct attribute *vmcu_attrs[] = {
 	&dev_attr_gpo2_mode.attr,
 	&dev_attr_gpo3_mode.attr,
 	&dev_attr_gpo4_mode.attr,
+	&dev_attr_gpo5_mode.attr,
+	&dev_attr_gpo6_mode.attr,
+	&dev_attr_gpo7_mode.attr,
+	&dev_attr_gpo8_mode.attr,
 	&dev_attr_wake_up_src.attr,
 	&dev_attr_ignition1_delay.attr,
 	&dev_attr_ignition2_delay.attr,
@@ -1091,6 +1171,14 @@ static ssize_t show_gpomode(struct device* dev, struct device_attribute* attr, c
 		always_on = 1;
 	if (attr == &dev_attr_gpo4_mode && (val & GPIOCTRL0_ALWAYS3_MASK) == GPIOCTRL0_ALWAYS3_MASK)
 		always_on = 1;
+	if (attr == &dev_attr_gpo5_mode && (val & GPIOCTRL0_ALWAYS4_MASK) == GPIOCTRL0_ALWAYS4_MASK)
+		always_on = 1;
+	if (attr == &dev_attr_gpo6_mode && (val & GPIOCTRL0_ALWAYS5_MASK) == GPIOCTRL0_ALWAYS5_MASK)
+		always_on = 1;
+	if (attr == &dev_attr_gpo7_mode && (val & GPIOCTRL0_ALWAYS6_MASK) == GPIOCTRL0_ALWAYS6_MASK)
+		always_on = 1;
+	if (attr == &dev_attr_gpo8_mode && (val & GPIOCTRL0_ALWAYS7_MASK) == GPIOCTRL0_ALWAYS7_MASK)
+		always_on = 1;
 
 	return sprintf(buf, "%s\n", always_on ? GPOMODE_ALWAYS_ON : GPOMODE_NONE);
 }
@@ -1110,6 +1198,14 @@ static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, 
 		mask = GPIOCTRL0_ALWAYS2_MASK;
 	if (attr == &dev_attr_gpo4_mode)
 		mask = GPIOCTRL0_ALWAYS3_MASK;
+	if (attr == &dev_attr_gpo5_mode)
+		mask = GPIOCTRL0_ALWAYS4_MASK;
+	if (attr == &dev_attr_gpo6_mode)
+		mask = GPIOCTRL0_ALWAYS5_MASK;
+	if (attr == &dev_attr_gpo7_mode)
+		mask = GPIOCTRL0_ALWAYS6_MASK;
+	if (attr == &dev_attr_gpo8_mode)
+		mask = GPIOCTRL0_ALWAYS7_MASK;
 
 	if (strncmp(buf, GPOMODE_ALWAYS_ON, strlen(GPOMODE_ALWAYS_ON)) == 0)
 		val = mask;
