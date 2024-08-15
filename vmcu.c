@@ -1494,7 +1494,7 @@ static irqreturn_t vmcu_shutdown_irq(int irq, void *private)
 	return IRQ_HANDLED;
 }
 
-static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
+static int vmcu_probe(struct i2c_client* client)
 {
 	struct vmcu *vmcu = NULL;
 	unsigned long irqtype = 0;
