@@ -199,6 +199,12 @@ struct vmcu_fw {
 	u32 file_size;
 };
 
+struct vmcu_version {
+	u8 major;
+	u8 minor;
+	u8 patch;
+};
+
 struct vmcu {
 	struct mutex			mtx;
 	struct regmap			*regmap;
@@ -210,6 +216,7 @@ struct vmcu {
 	struct fw_upload		*fw_upload;
 	struct vmcu_fw			fw;
 	struct device			*root_dev;
+	struct vmcu_version		version;
 };
 
 static int rtc_set(struct device *dev, struct rtc_time *rtctime)
@@ -1521,10 +1528,11 @@ static int vmcu_probe(struct i2c_client* client, const struct i2c_device_id* id)
 	r = regmap_read(vmcu->regmap, VERSION_REG, &val);
 	if (r < 0)
 		return r;
+	vmcu->version.major = (val & VERSION_MAJOR_MASK) >> VERSION_MAJOR_SHIFT;
+	vmcu->version.minor = (val & VERSION_MINOR_MASK) >> VERSION_MINOR_SHIFT;
+	vmcu->version.patch = (val & VERSION_PATCH_MASK) >> VERSION_PATCH_SHIFT;
 	dev_info(&client->dev, "Version: %u.%u.%u\n",
-			(u32) (val & VERSION_MAJOR_MASK) >> VERSION_MAJOR_SHIFT,
-			(u32) (val & VERSION_MINOR_MASK) >> VERSION_MINOR_SHIFT,
-			(u32) (val & VERSION_PATCH_MASK) >> VERSION_PATCH_SHIFT);
+			vmcu->version.major, vmcu->version.minor, vmcu->version.patch);
 
 	// rtc
 	vmcu->rtc = devm_rtc_device_register(&client->dev, "vmcu", &vmcu_rtc_ops, THIS_MODULE);
