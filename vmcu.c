@@ -1563,9 +1563,7 @@ static int vmcu_probe(struct i2c_client* client)
 		return r;
 
 	// firmware
-	r = firmware_register(vmcu);
-	if (r < 0)
-		return r;
+	firmware_register(vmcu);
 
 	// interrupts
 	r = of_irq_get_byname(client->dev.of_node, "shutdown");
