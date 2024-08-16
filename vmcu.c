@@ -1629,4 +1629,4 @@ module_i2c_driver(vmcu_driver);
 MODULE_AUTHOR("Mikko Salomäki <ms@datarespons.se>");
 MODULE_DESCRIPTION("Vehicle MCU driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("1.6");
+MODULE_VERSION("1.7");
