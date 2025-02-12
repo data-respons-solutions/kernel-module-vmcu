@@ -1078,6 +1078,7 @@ static ssize_t show_version(struct device* dev, struct device_attribute* attr, c
 static ssize_t show_gpomode(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t show_ignition_max(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t store_value(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 static ssize_t store_factory(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
@@ -1095,7 +1096,9 @@ static DEVICE_ATTR(gpo7_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo8_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(wake_up_src, 0444, show_wake_up_src, NULL);
 static DEVICE_ATTR(ignition1_delay, 0644, show_value, store_value);
+static DEVICE_ATTR(ignition1_delay_max, 0444, show_ignition_max, NULL);
 static DEVICE_ATTR(ignition2_delay, 0644, show_value, store_value);
+static DEVICE_ATTR(ignition2_delay_max, 0444, show_ignition_max, NULL);
 static DEVICE_ATTR(rtc_wakeup, 0644, show_value, store_value);
 static DEVICE_ATTR(factory, 0220, NULL, store_factory);
 static DEVICE_ATTR(imu_wake_enable, 0644, show_value, store_value);
@@ -1117,7 +1120,9 @@ static struct attribute *vmcu_attrs[] = {
 	&dev_attr_gpo8_mode.attr,
 	&dev_attr_wake_up_src.attr,
 	&dev_attr_ignition1_delay.attr,
+	&dev_attr_ignition1_delay_max.attr,
 	&dev_attr_ignition2_delay.attr,
+	&dev_attr_ignition2_delay_max.attr,
 	&dev_attr_rtc_wakeup.attr,
 	&dev_attr_factory.attr,
 	&dev_attr_imu_wake_enable.attr,
@@ -1265,6 +1270,11 @@ static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* att
 		str = (char*) WAKE_UP_SRC_RTC;
 
 	return sprintf(buf, "%s\n", str);
+}
+
+static ssize_t show_ignition_max(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	return snprintf(buf, "%u\n", WAKECTRL1_DELAY_IGN1_MASK >> WAKECTRL1_DELAY_IGN1_SHIFT);
 }
 
 static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf)
