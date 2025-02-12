@@ -87,6 +87,8 @@
 #define WAKECTRL0_SRC_IGN2_MASK		GENMASK(26, 25)
 #define WAKECTRL0_SRC_ACC_MASK		(BIT(24) | BIT(26))
 #define WAKECTRL0_SRC_RTC_MASK		BIT(25)
+#define WAKECTRL0_IGNITION1_EDGE	BIT(27)
+#define WAKECTRL0_IGNITION2_EDGE	BIT(29)
 #define WAKECTRL1_REG				0x22
 #define WAKECTRL1_DELAY_IGN1_MASK	GENMASK(15, 0)
 #define WAKECTRL1_DELAY_IGN1_SHIFT	0
@@ -1045,7 +1047,7 @@ exit:
 	return r;
 }
 
-void vmcu_fw_cancel(struct fw_upload* fw_upload)
+static void vmcu_fw_cancel(struct fw_upload* fw_upload)
 {
 	struct vmcu *vmcu = fw_upload->dd_handle;
 	dev_info(&vmcu->client->dev, "cancel\n");
@@ -1079,6 +1081,9 @@ static ssize_t show_gpomode(struct device* dev, struct device_attribute* attr, c
 static ssize_t store_gpomode(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t show_ignition_max(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t show_ignition_available(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t show_ignition_mode(struct device* dev, struct device_attribute* attr, char* buf);
+static ssize_t store_ignition_mode(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf);
 static ssize_t store_value(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
 static ssize_t store_factory(struct device* dev, struct device_attribute* attr, const char* buf, size_t count);
@@ -1095,10 +1100,12 @@ static DEVICE_ATTR(gpo6_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo7_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(gpo8_mode, 0664, show_gpomode, store_gpomode);
 static DEVICE_ATTR(wake_up_src, 0444, show_wake_up_src, NULL);
+static DEVICE_ATTR(ignition_delay_max, 0444, show_ignition_max, NULL);
+static DEVICE_ATTR(ignition_mode_available, 0444, show_ignition_available, NULL);
 static DEVICE_ATTR(ignition1_delay, 0644, show_value, store_value);
-static DEVICE_ATTR(ignition1_delay_max, 0444, show_ignition_max, NULL);
+static DEVICE_ATTR(ignition1_mode, 0644, show_ignition_mode, store_ignition_mode);
 static DEVICE_ATTR(ignition2_delay, 0644, show_value, store_value);
-static DEVICE_ATTR(ignition2_delay_max, 0444, show_ignition_max, NULL);
+static DEVICE_ATTR(ignition2_mode, 0644, show_ignition_mode, store_ignition_mode);
 static DEVICE_ATTR(rtc_wakeup, 0644, show_value, store_value);
 static DEVICE_ATTR(factory, 0220, NULL, store_factory);
 static DEVICE_ATTR(imu_wake_enable, 0644, show_value, store_value);
@@ -1119,10 +1126,12 @@ static struct attribute *vmcu_attrs[] = {
 	&dev_attr_gpo7_mode.attr,
 	&dev_attr_gpo8_mode.attr,
 	&dev_attr_wake_up_src.attr,
+	&dev_attr_ignition_delay_max.attr,
+	&dev_attr_ignition_mode_available.attr,
 	&dev_attr_ignition1_delay.attr,
-	&dev_attr_ignition1_delay_max.attr,
+	&dev_attr_ignition1_mode.attr,
 	&dev_attr_ignition2_delay.attr,
-	&dev_attr_ignition2_delay_max.attr,
+	&dev_attr_ignition2_mode.attr,
 	&dev_attr_rtc_wakeup.attr,
 	&dev_attr_factory.attr,
 	&dev_attr_imu_wake_enable.attr,
@@ -1274,7 +1283,76 @@ static ssize_t show_wake_up_src(struct device* dev, struct device_attribute* att
 
 static ssize_t show_ignition_max(struct device* dev, struct device_attribute* attr, char* buf)
 {
-	return snprintf(buf, "%u\n", WAKECTRL1_DELAY_IGN1_MASK >> WAKECTRL1_DELAY_IGN1_SHIFT);
+	return sprintf(buf, "%u\n", (u32) WAKECTRL1_DELAY_IGN1_MASK >> WAKECTRL1_DELAY_IGN1_SHIFT);
+}
+
+static const char* IGN_LEVEL_HIGH = "level_high";
+static const char* IGN_RISING_EDGE = "rising_edge";
+
+static ssize_t show_ignition_available(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	return sprintf(buf, "%s %s\n", IGN_LEVEL_HIGH, IGN_RISING_EDGE);
+}
+
+static ssize_t show_ignition_mode(struct device* dev, struct device_attribute* attr, char* buf)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	char *str = NULL;
+	u32 val = 0;
+	int r = 0;
+	u32 edge_bit = 0;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	r = regmap_read(vmcu->regmap, WAKECTRL0_REG, &val);
+	mutex_unlock(&vmcu->mtx);
+	if (r < 0)
+		return r;
+
+	if (attr == &dev_attr_ignition1_mode)
+		edge_bit = WAKECTRL0_IGNITION1_EDGE;
+	if (attr == &dev_attr_ignition2_mode)
+		edge_bit = WAKECTRL0_IGNITION2_EDGE;
+
+	if ((val & edge_bit) == edge_bit)
+		str = (char*) IGN_RISING_EDGE;
+	else
+		str = (char*) IGN_LEVEL_HIGH;
+
+	return sprintf(buf, "%s\n", str);
+}
+
+static ssize_t store_ignition_mode(struct device* dev, struct device_attribute* attr, const char* buf, size_t count)
+{
+	struct vmcu *vmcu = dev_get_drvdata(dev);
+	u32 edge_mask = 0;
+	u32 edge_bit = 0;
+	int r = 0;
+
+	if (attr == &dev_attr_ignition1_mode)
+		edge_mask = WAKECTRL0_IGNITION1_EDGE;
+	if (attr == &dev_attr_ignition2_mode)
+		edge_mask = WAKECTRL0_IGNITION2_EDGE;
+
+	if (strncmp(buf, IGN_RISING_EDGE, strlen(IGN_RISING_EDGE)) == 0)
+		edge_bit = edge_mask;
+	else if (strncmp(buf, IGN_LEVEL_HIGH, strlen(IGN_LEVEL_HIGH)) == 0)
+		edge_bit = 0;
+	else
+		return -EINVAL;
+
+	r = mutex_lock_interruptible(&vmcu->mtx);
+	if (r)
+		return r;
+
+	r = regmap_update_bits(vmcu->regmap, WAKECTRL0_REG, edge_mask, edge_bit);
+	mutex_unlock(&vmcu->mtx);
+	if (r < 0)
+		return r;
+
+	return count;
 }
 
 static ssize_t show_value(struct device* dev, struct device_attribute* attr, char* buf)
