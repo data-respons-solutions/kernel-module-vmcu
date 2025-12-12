@@ -622,7 +622,7 @@ static int vmcu_gpio_get(struct gpio_chip* chip, unsigned int offset)
 	return r;
 }
 
-static void vmcu_gpio_set_multiple(struct gpio_chip* chip, unsigned long* mask, unsigned long* bits)
+static int vmcu_gpio_set_multiple(struct gpio_chip* chip, unsigned long* mask, unsigned long* bits)
 {
 	struct vmcu *vmcu = gpiochip_get_data(chip);
 	int r = 0;
@@ -648,17 +648,18 @@ static void vmcu_gpio_set_multiple(struct gpio_chip* chip, unsigned long* mask, 
 	if (data != 0) {
 		r = mutex_lock_interruptible(&vmcu->mtx);
 		if (r)
-			return;
-		regmap_write(vmcu->regmap, GPIO0_REG, data);
+			return r;
+		r = regmap_write(vmcu->regmap, GPIO0_REG, data);
 		mutex_unlock(&vmcu->mtx);
 	}
+	return r;
 }
 
-static void vmcu_gpio_set(struct gpio_chip* chip, unsigned int offset, int value)
+static int vmcu_gpio_set(struct gpio_chip* chip, unsigned int offset, int value)
 {
 	unsigned long mask = 1 << offset;
 	unsigned long bits = value ? mask : 0;
-	vmcu_gpio_set_multiple(chip, &mask, &bits);
+	return vmcu_gpio_set_multiple(chip, &mask, &bits);
 }
 
 static int gpio_register(struct vmcu *vmcu)
