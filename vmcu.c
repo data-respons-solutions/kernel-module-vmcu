@@ -63,6 +63,10 @@
 #define LED0_GREEN_MASK			BIT(0)
 #define LED0_RED_MASK			BIT(1)
 #define LED0_BLINK_MASK			BIT(2)
+#define LED0_ON_TIME_MASK       GENMASK(7, 3)
+#define LED0_ON_TIME_SHIFT      3
+#define LED0_OFF_TIME_MASK      GENMASK(12, 8)
+#define LED0_OFF_TIME_SHIFT     8
 #define SENSOR_REG				0x6
 #define SENSOR_ITEMP_MASK		GENMASK(10, 0)
 #define SENSOR_ITEMP_SIGN_MASK	BIT(11)
@@ -299,21 +303,38 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 static struct rtc_class_ops vmcu_rtc_ops = {
 	.read_time = rtc_read, .set_time = rtc_set, };
 
+#define LED_DEFAULT_BLINK_PERIOD_MS 500
+/* vmcu register value is in multiples of 100ms */
+#define LED_BLINK_MAX_MS 3100
+#define LED_BLINK_MIN_MS 100
+
 static int led0_blink(struct led_classdev *cdev, unsigned long *delay_on, unsigned long *delay_off)
 {
 	struct vmcu* vmcu = dev_get_drvdata(cdev->dev->parent);
 	int r = 0;
 
+	/* value of 0 expects a reasonable default */
+	if (*delay_on == 0)
+		*delay_on = LED_DEFAULT_BLINK_PERIOD_MS;
+	if (*delay_off == 0)
+		*delay_off = LED_DEFAULT_BLINK_PERIOD_MS;
+
+	/* clamp to minimum and maximum supported values */
+	*delay_on = clamp(*delay_on, LED_BLINK_MIN_MS, LED_BLINK_MAX_MS);
+	*delay_off = clamp(*delay_off, LED_BLINK_MIN_MS, LED_BLINK_MAX_MS);
+
+	const uint32_t value = LED0_BLINK_MASK
+							| (((*delay_on / 100) << LED0_ON_TIME_SHIFT) & LED0_ON_TIME_MASK)
+							| (((*delay_off / 100) << LED0_OFF_TIME_SHIFT) & LED0_OFF_TIME_MASK);
+	const uint32_t mask = LED0_BLINK_MASK | LED0_ON_TIME_MASK | LED0_OFF_TIME_MASK;
+
 	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return r;
-	r = regmap_update_bits(vmcu->regmap, LED0_REG, LED0_BLINK_MASK, LED0_BLINK_MASK);
+	r = regmap_update_bits(vmcu->regmap, LED0_REG, mask, value);
 	mutex_unlock(&vmcu->mtx);
 	if (r)
 		return r;
-
-	*delay_on = 1000;
-	*delay_off = 1000;
 
 	return 0;
 }
