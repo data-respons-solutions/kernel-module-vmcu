@@ -60,13 +60,22 @@
 #define RTC_DATE_WDAY_MASK		GENMASK(31, 24)
 #define RTC_DATE_WDAY_SHIFT		24
 #define LED0_REG				0x4
-#define LED0_GREEN_MASK			BIT(0)
-#define LED0_RED_MASK			BIT(1)
-#define LED0_BLINK_MASK			BIT(2)
-#define LED0_ON_TIME_MASK       GENMASK(7, 3)
-#define LED0_ON_TIME_SHIFT      3
-#define LED0_OFF_TIME_MASK      GENMASK(12, 8)
-#define LED0_OFF_TIME_SHIFT     8
+#define LED1_REG				0x5
+#define LED2_REG				0x7
+#define LED3_REG				0x8
+#define LED4_REG				0x9
+#define LED5_REG				0xa
+#define LED6_REG				0xb
+#define LED7_REG				0xc
+#define LED8_REG				0xd
+#define LED_GREEN_MASK			BIT(0)
+#define LED_RED_MASK			BIT(1)
+#define LED_BLINK_MASK			BIT(2)
+#define LED_ON_TIME_MASK		GENMASK(7, 3)
+#define LED_ON_TIME_SHIFT		3
+#define LED_OFF_TIME_MASK		GENMASK(12, 8)
+#define LED_OFF_TIME_SHIFT		8
+#define LED_B_SHIFT				16
 #define SENSOR_REG				0x6
 #define SENSOR_ITEMP_MASK		GENMASK(10, 0)
 #define SENSOR_ITEMP_SIGN_MASK	BIT(11)
@@ -188,7 +197,8 @@ static const struct regmap_config vmcu_regmap_config = {
 	.disable_locking = 1,
 };
 
-#define LED0_NUM_COLORS	2
+#define LED_NUM 18
+#define LED_NUM_COLORS	2
 #define ADC_REF_mV 		3300
 
 enum vmcu_fw_part {
@@ -216,8 +226,8 @@ struct vmcu {
 	struct regmap			*regmap;
 	struct i2c_client		*client;
 	struct rtc_device 		*rtc;
-	struct led_classdev_mc	led0;
-	struct mc_subled 		led0_subled[LED0_NUM_COLORS];
+	struct led_classdev_mc	led[LED_NUM];
+	struct mc_subled 		led_subled[LED_NUM * LED_NUM_COLORS];
 	struct gpio_chip		gpio;
 	struct fw_upload		*fw_upload;
 	struct vmcu_fw			fw;
@@ -303,14 +313,43 @@ static int rtc_read(struct device *dev, struct rtc_time *rtctime)
 static struct rtc_class_ops vmcu_rtc_ops = {
 	.read_time = rtc_read, .set_time = rtc_set, };
 
+struct vmcu_led {
+	char* label;
+	uint32_t reg;
+	uint32_t shift;
+};
+
+static const struct vmcu_led vmcu_leds[LED_NUM] = {
+	{"led0",  LED0_REG, 0},
+	{"led1",  LED0_REG, LED_B_SHIFT},
+	{"led2",  LED1_REG, 0},
+	{"led3",  LED1_REG, LED_B_SHIFT},
+	{"led4",  LED2_REG, 0},
+	{"led5",  LED2_REG, LED_B_SHIFT},
+	{"led6",  LED3_REG, 0},
+	{"led7",  LED3_REG, LED_B_SHIFT},
+	{"led8",  LED4_REG, 0},
+	{"led9",  LED4_REG, LED_B_SHIFT},
+	{"led10", LED5_REG, 0},
+	{"led11", LED5_REG, LED_B_SHIFT},
+	{"led12", LED6_REG, 0},
+	{"led13", LED6_REG, LED_B_SHIFT},
+	{"led14", LED7_REG, 0},
+	{"led15", LED7_REG, LED_B_SHIFT},
+	{"led16", LED8_REG, 0},
+	{"led17", LED8_REG, LED_B_SHIFT},
+};
+
 #define LED_DEFAULT_BLINK_PERIOD_MS 500
 /* vmcu register value is in multiples of 100ms */
 #define LED_BLINK_MAX_MS 3100
 #define LED_BLINK_MIN_MS 100
 
-static int led0_blink(struct led_classdev *cdev, unsigned long *delay_on, unsigned long *delay_off)
+static int led_blink(struct led_classdev *cdev, unsigned long *delay_on, unsigned long *delay_off)
 {
+	struct led_classdev_mc *led = lcdev_to_mccdev(cdev);
 	struct vmcu* vmcu = dev_get_drvdata(cdev->dev->parent);
+	const struct vmcu_led *vled = &vmcu_leds[led->subled_info[0].channel];
 	int r = 0;
 
 	/* value of 0 expects a reasonable default */
@@ -323,15 +362,17 @@ static int led0_blink(struct led_classdev *cdev, unsigned long *delay_on, unsign
 	*delay_on = clamp(*delay_on, LED_BLINK_MIN_MS, LED_BLINK_MAX_MS);
 	*delay_off = clamp(*delay_off, LED_BLINK_MIN_MS, LED_BLINK_MAX_MS);
 
-	const uint32_t value = LED0_BLINK_MASK
-							| (((*delay_on / 100) << LED0_ON_TIME_SHIFT) & LED0_ON_TIME_MASK)
-							| (((*delay_off / 100) << LED0_OFF_TIME_SHIFT) & LED0_OFF_TIME_MASK);
-	const uint32_t mask = LED0_BLINK_MASK | LED0_ON_TIME_MASK | LED0_OFF_TIME_MASK;
+	const uint32_t value = (LED_BLINK_MASK
+							| (((*delay_on / 100) << LED_ON_TIME_SHIFT) & LED_ON_TIME_MASK)
+							| (((*delay_off / 100) << LED_OFF_TIME_SHIFT) & LED_OFF_TIME_MASK))
+							<< vled->shift;
+	const uint32_t mask = (LED_BLINK_MASK | LED_ON_TIME_MASK | LED_OFF_TIME_MASK)
+							<< vled->shift;
 
 	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return r;
-	r = regmap_update_bits(vmcu->regmap, LED0_REG, mask, value);
+	r = regmap_update_bits(vmcu->regmap, vled->reg, mask, value);
 	mutex_unlock(&vmcu->mtx);
 	if (r)
 		return r;
@@ -339,27 +380,28 @@ static int led0_blink(struct led_classdev *cdev, unsigned long *delay_on, unsign
 	return 0;
 }
 
-static int led0_set_blocking(struct led_classdev *cdev, enum led_brightness brightness)
+static int led_set_blocking(struct led_classdev *cdev, enum led_brightness brightness)
 {
-	struct led_classdev_mc *led0 = lcdev_to_mccdev(cdev);
+	struct led_classdev_mc *led = lcdev_to_mccdev(cdev);
 	struct vmcu* vmcu = dev_get_drvdata(cdev->dev->parent);
-	uint32_t mask = LED0_GREEN_MASK | LED0_RED_MASK;
+	const struct vmcu_led *vled = &vmcu_leds[led->subled_info[0].channel];
+	uint32_t mask = LED_GREEN_MASK | LED_RED_MASK;
 	uint32_t val = 0;
 	int r = 0;
 
-	led_mc_calc_color_components(led0, brightness);
+	led_mc_calc_color_components(led, brightness);
 
-	if (led0->subled_info[0].brightness == 1)
-		val |= LED0_RED_MASK;
-	if (led0->subled_info[1].brightness == 1)
-		val |= LED0_GREEN_MASK;
+	if (led->subled_info[0].brightness == 1)
+		val |= LED_RED_MASK;
+	if (led->subled_info[1].brightness == 1)
+		val |= LED_GREEN_MASK;
 	if (val == 0)
-		mask |= LED0_BLINK_MASK;
+		mask |= LED_BLINK_MASK;
 
 	r = mutex_lock_interruptible(&vmcu->mtx);
 	if (r)
 		return r;
-	r = regmap_update_bits(vmcu->regmap, LED0_REG, mask, val);
+	r = regmap_update_bits(vmcu->regmap, vled->reg, mask << vled->shift, val << vled->shift);
 	mutex_unlock(&vmcu->mtx);
 	if (r)
 		return r;
@@ -367,39 +409,65 @@ static int led0_set_blocking(struct led_classdev *cdev, enum led_brightness brig
 	return 0;
 }
 
-static int led0_register(struct vmcu* vmcu)
+static int led_register(struct vmcu* vmcu)
 {
-	struct led_init_data init_data = {};
+	const char **names = NULL;
 	int r = 0;
-	uint32_t val = 0;
+	/* Check if led names are defined in DT */
+	int count = device_property_string_array_count(&vmcu->client->dev, "led-names");
+	if (count > 0) {
+		names = kcalloc(count, sizeof(*names), GFP_KERNEL);
+		if (names == NULL)
+			return -ENOMEM;
 
-	r = regmap_read(vmcu->regmap, LED0_REG, &val);
-	if (r) {
-		dev_err(&vmcu->client->dev, "Failed reading led0 state\n");
-		return r;
+		r = device_property_read_string_array(&vmcu->client->dev, "led-names",
+												names, count);
+		if (r < 0)
+			dev_warn(&vmcu->client->dev, "failed reading \"led-names\": %d\n", r);
 	}
 
-	vmcu->led0_subled[0].color_index = LED_COLOR_ID_RED;
-	vmcu->led0_subled[0].channel = 0;
-	vmcu->led0_subled[0].brightness = (val & LED0_RED_MASK) == LED0_RED_MASK ? 1 : 0;
-	vmcu->led0_subled[1].color_index = LED_COLOR_ID_GREEN;
-	vmcu->led0_subled[1].channel = 1;
-	vmcu->led0_subled[1].brightness = (val & LED0_GREEN_MASK) == LED0_GREEN_MASK ? 1 : 0;
-	vmcu->led0.subled_info = &vmcu->led0_subled[0];
-	vmcu->led0.num_colors = LED0_NUM_COLORS;
-	init_data.default_label = ":led0";
-	init_data.devicename = "vmcu";
-	vmcu->led0.led_cdev.max_brightness = 1;
-	vmcu->led0.led_cdev.brightness_set_blocking = led0_set_blocking;
-	vmcu->led0.led_cdev.blink_set = led0_blink;
+	for (size_t i = 0; i < ARRAY_SIZE(vmcu_leds); ++i) {
+		struct led_init_data init_data = {};
 
-	r = devm_led_classdev_multicolor_register_ext(&vmcu->client->dev, &vmcu->led0, &init_data);
-	if (r < 0) {
-		dev_err(&vmcu->client->dev, "Failed registering led0\n");
-		return r;
+		/* Disable led if active across reboot cycle.
+		*  vmcu will disable led when powered off but can't
+		*  detect reboot. */
+		r = regmap_update_bits(vmcu->regmap, vmcu_leds[i].reg,
+				(LED_GREEN_MASK | LED_RED_MASK | LED_BLINK_MASK) << vmcu_leds[i].shift, 0);
+		if (r)
+			dev_err(&vmcu->client->dev, "Failed disabling %s: %d\n", vmcu_leds[i].label, r);
+
+		const size_t ired = i * 2;
+		const size_t igreen = ired + 1;
+		vmcu->led_subled[ired].color_index = LED_COLOR_ID_RED;
+		vmcu->led_subled[ired].channel = i;
+		vmcu->led_subled[ired].brightness = 0;
+		vmcu->led_subled[igreen].color_index = LED_COLOR_ID_GREEN;
+		vmcu->led_subled[igreen].channel = i;
+		vmcu->led_subled[igreen].brightness = 0;
+		vmcu->led[i].subled_info = &vmcu->led_subled[ired];
+		vmcu->led[i].num_colors = LED_NUM_COLORS;
+		init_data.devicename = "vmcu";
+		init_data.devname_mandatory = 1;
+		/* Use DT provided name if available */
+		init_data.default_label = count >= i && names[i][0] ? names[i] : vmcu_leds[i].label;
+		vmcu->led[i].led_cdev.max_brightness = 1;
+		vmcu->led[i].led_cdev.brightness_set_blocking = led_set_blocking;
+		vmcu->led[i].led_cdev.blink_set = led_blink;
+
+		r = devm_led_classdev_multicolor_register_ext(&vmcu->client->dev, &vmcu->led[i], &init_data);
+		if (r < 0) {
+			dev_err(&vmcu->client->dev, "Failed registering %s\n", vmcu_leds[i].label);
+			goto exit;
+		}
 	}
 
-	return 0;
+	r = 0;
+
+exit:
+	if (names != NULL)
+		kfree(names);
+	return r;
 }
 
 static int iio_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *chan, int *val, int *val2, long info)
@@ -1649,18 +1717,10 @@ static int vmcu_probe(struct i2c_client* client)
 	if (IS_ERR(vmcu->rtc))
 		return PTR_ERR(vmcu->rtc);
 
-	// led0
-	r = led0_register(vmcu);
+	// led
+	r = led_register(vmcu);
 	if (r < 0)
 		return r;
-	/* Disable led0 if active across reboot cycle.
-	*  vmcu will disable led0 when powered off but can't
-	*  detect reboot.
-	*/
-	r = regmap_update_bits(vmcu->regmap, LED0_REG,
-				LED0_GREEN_MASK | LED0_RED_MASK | LED0_BLINK_MASK, 0);
-	if (r)
-		dev_err(&client->dev, "Failed disabling led0: %d\n", r);
 
 	// adc
 	r = adc_register(vmcu);
