@@ -143,6 +143,12 @@
 #define GPIOCTRL0_ALWAYS5_MASK	BIT(5)
 #define GPIOCTRL0_ALWAYS6_MASK	BIT(6)
 #define GPIOCTRL0_ALWAYS7_MASK	BIT(7)
+#define DAC0_REG				0x40
+#define DAC1_REG				0x41
+#define DAC_VALUE_MASK			GENMASK(11, 0)
+#define DAC_DEFVALUE_MASK		GENMASK(23, 12)
+#define DAC_DEFVALUE_SHIFT		12
+#define DAC_DEFVALUE_SET		BIT(24)
 #define IMUCTRL_REG					0x50
 #define IMUCTRL_WAKEUP_ENABLE_MASK	BIT(0)
 #define IMUCTRL_FILTER_MASK			BIT(1)
@@ -485,6 +491,52 @@ static int led_register(struct vmcu* vmcu)
 	return 0;
 }
 
+/* Used for array data indexing */
+enum vmcu_channel {
+	VMCU_CH_ADC0,
+	VMCU_CH_ADC1,
+	VMCU_CH_ADC2,
+	VMCU_CH_ADC3,
+	VMCU_CH_ADC4,
+	VMCU_CH_ADC5,
+	VMCU_CH_ADC6,
+	VMCU_CH_ADC7,
+	VMCU_CH_ADC8,
+	VMCU_CH_VBAT,
+	VMCU_CH_ITEMP,
+	VMCU_CH_DAC0,
+	VMCU_CH_DAC0_DEF,
+	VMCU_CH_DAC1,
+	VMCU_CH_DAC1_DEF,
+	VMCU_CH_SIZE,
+};
+
+struct vmcu_channel_data {
+	uint32_t reg;
+	uint32_t mask;
+	uint32_t shift;
+	uint32_t has_write;
+	uint32_t write_mask;
+};
+
+const struct vmcu_channel_data vmcu_iio_data[VMCU_CH_SIZE] = {
+	{ADC0_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC1_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC2_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC3_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC4_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC5_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC6_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC7_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC8_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{ADC_VBAT_REG, ADC_VALUE_MASK, 0, 0, 0},
+	{SENSOR_REG, 0, 0, 0, 0},
+	{DAC0_REG, DAC_VALUE_MASK, 0, 1, 0},
+	{DAC0_REG, DAC_DEFVALUE_MASK, DAC_DEFVALUE_SHIFT, 1, DAC_DEFVALUE_SET},
+	{DAC1_REG, DAC_VALUE_MASK, 0, 1, 0},
+	{DAC1_REG, DAC_DEFVALUE_MASK, DAC_DEFVALUE_SHIFT, 1, DAC_DEFVALUE_SET},
+};
+
 static int iio_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *chan, int *val, int *val2, long info)
 {
 	struct vmcu *vmcu = dev_get_drvdata(indio_dev->dev.parent);
@@ -497,17 +549,17 @@ static int iio_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *c
 		r = mutex_lock_interruptible(&vmcu->mtx);
 		if (r)
 			return r;
-		r = regmap_read(vmcu->regmap, chan->address, &data);
+		r = regmap_read(vmcu->regmap, vmcu_iio_data[chan->channel].reg, &data);
 		mutex_unlock(&vmcu->mtx);
 		if (r)
 			return r;
-		*val = data & ADC_VALUE_MASK;
+		*val = (data & vmcu_iio_data[chan->channel].mask) >> vmcu_iio_data[chan->channel].shift;
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_PROCESSED:
 		r = mutex_lock_interruptible(&vmcu->mtx);
 		if (r)
 			return r;
-		r = regmap_read(vmcu->regmap, chan->address, &data);
+		r = regmap_read(vmcu->regmap, vmcu_iio_data[chan->channel].reg, &data);
 		mutex_unlock(&vmcu->mtx);
 		if (r)
 			return r;
@@ -526,98 +578,144 @@ static int iio_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *c
 	return -EINVAL;
 }
 
+static int iio_write_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *chan, int val, int val2, long info)
+{
+	struct vmcu *vmcu = dev_get_drvdata(indio_dev->dev.parent);
+	uint32_t data = 0;
+	uint32_t mask = 0;
+	int r = 0;
+
+	if (vmcu_iio_data[chan->channel].has_write == 0)
+		return -EINVAL;
+
+	switch (info) {
+	case IIO_CHAN_INFO_RAW:
+		data = ((val << vmcu_iio_data[chan->channel].shift)
+				& vmcu_iio_data[chan->channel].mask)
+				| vmcu_iio_data[chan->channel].write_mask;
+		mask = vmcu_iio_data[chan->channel].mask | vmcu_iio_data[chan->channel].write_mask;
+		r = mutex_lock_interruptible(&vmcu->mtx);
+		if (r)
+			return r;
+		r = regmap_write_bits(vmcu->regmap, vmcu_iio_data[chan->channel].reg, mask, data);
+		mutex_unlock(&vmcu->mtx);
+		if (r)
+			return r;
+		return 0;
+	}
+	return -EINVAL;
+}
+
 static const struct iio_chan_spec vmcu_iio_channels[] = {
 	{
-		.channel = 0,
+		.channel = VMCU_CH_ADC0,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC0_REG,
 		.extend_name = "adc0",
 	},
 	{
-		.channel = 1,
+		.channel = VMCU_CH_ADC1,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC1_REG,
 		.extend_name = "adc1",
 	},
 	{
-		.channel = 2,
+		.channel = VMCU_CH_ADC2,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC2_REG,
 		.extend_name = "adc2",
 	},
 	{
-		.channel = 3,
+		.channel = VMCU_CH_ADC3,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC3_REG,
 		.extend_name = "adc3",
 	},
 	{
-		.channel = 4,
+		.channel = VMCU_CH_ADC4,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC4_REG,
 		.extend_name = "adc4",
 	},
 	{
-		.channel = 5,
+		.channel = VMCU_CH_ADC5,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC5_REG,
 		.extend_name = "adc5",
 	},
 	{
-		.channel = 6,
+		.channel = VMCU_CH_ADC6,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC6_REG,
 		.extend_name = "adc6",
 	},
 	{
-		.channel = 7,
+		.channel = VMCU_CH_ADC7,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC7_REG,
 		.extend_name = "adc7",
 	},
 	{
-		.channel = 8,
+		.channel = VMCU_CH_ADC8,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC8_REG,
 		.extend_name = "adc8",
 	},
 	{
-		.channel = 9,
+		.channel = VMCU_CH_VBAT,
 		.type = IIO_VOLTAGE,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
 		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-		.address = ADC_VBAT_REG,
 		.extend_name = "vbat",
 	},
 	{
-		.channel = 10,
+		.channel = VMCU_CH_ITEMP,
 		.type = IIO_TEMP,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
-		.address = SENSOR_REG,
 		.extend_name = "itemp",
+	},
+	{
+		.channel = VMCU_CH_DAC0,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.extend_name ="dac0",
+	},
+	{
+		.channel = VMCU_CH_DAC0_DEF,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.extend_name ="dac0_default",
+	},
+	{
+		.channel = VMCU_CH_DAC1,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.extend_name ="dac1",
+	},
+	{
+		.channel = VMCU_CH_DAC1_DEF,
+		.type = IIO_VOLTAGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
+		.extend_name ="dac1_default",
 	},
 };
 
 static const struct iio_info vmcu_iio_info = {
 	.read_raw = iio_read_raw,
+	.write_raw = iio_write_raw,
 };
 
 static int adc_register(struct vmcu *vmcu)
