@@ -14,22 +14,22 @@ die() {
 [ "$#" -eq 2 -a "$2" != "blink" ] && die "Invalid argument"
 
 # Set brightness to 0 in order to disable blink
-echo 0 >/sys/class/leds/vmcu\:\:led0/brightness || die "Failed setting brightness"
+echo 0 >/sys/class/leds/\:status/brightness || die "Failed setting brightness"
 
 case $1 in
 	red)
-		echo 1 >/sys/class/leds/vmcu\:\:led0/brightness || die "Failed setting brightness"
-		echo 1 0 >/sys/class/leds/vmcu\:\:led0/multi_intensity || die "Failed setting red"
+		echo 1 >/sys/class/leds/\:status/brightness || die "Failed setting brightness"
+		echo 1 0 >/sys/class/leds/\:status/multi_intensity || die "Failed setting red"
 		;;
 		
 	green)
-		echo 1 >/sys/class/leds/vmcu\:\:led0/brightness|| die "Failed setting brightness"
-		echo 0 1 >/sys/class/leds/vmcu\:\:led0/multi_intensity || die "Failed setting green"
+		echo 1 >/sys/class/leds/\:status/brightness|| die "Failed setting brightness"
+		echo 0 1 >/sys/class/leds/\:status/multi_intensity || die "Failed setting green"
 		;;
 
 	yellow)
-		echo 1 >/sys/class/leds/vmcu\:\:led0/brightness || die "Failed setting brightness"
-		echo 1 1 >/sys/class/leds/vmcu\:\:led0/multi_intensity || die "Failed setting yellow"
+		echo 1 >/sys/class/leds/\:status/brightness || die "Failed setting brightness"
+		echo 1 1 >/sys/class/leds/\:status/multi_intensity || die "Failed setting yellow"
 		;;
 		
 	off)
@@ -37,7 +37,7 @@ case $1 in
 esac
 
 if [ $# -eq 2 ] && [ $2 = "blink" ]; then
-	echo timer > /sys/class/leds/vmcu\:\:led0/trigger || die "Failed setting blink"
+	echo timer > /sys/class/leds/\:status/trigger || die "Failed setting blink"
 fi
 
 exit 0
