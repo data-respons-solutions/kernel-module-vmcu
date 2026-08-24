@@ -19,6 +19,7 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/property.h>
 #include <linux/init.h>
 #include <linux/mutex.h>
 #include <linux/delay.h>
@@ -314,30 +315,29 @@ static struct rtc_class_ops vmcu_rtc_ops = {
 	.read_time = rtc_read, .set_time = rtc_set, };
 
 struct vmcu_led {
-	char* label;
 	uint32_t reg;
 	uint32_t shift;
 };
 
 static const struct vmcu_led vmcu_leds[LED_NUM] = {
-	{"led0",  LED0_REG, 0},
-	{"led1",  LED0_REG, LED_B_SHIFT},
-	{"led2",  LED1_REG, 0},
-	{"led3",  LED1_REG, LED_B_SHIFT},
-	{"led4",  LED2_REG, 0},
-	{"led5",  LED2_REG, LED_B_SHIFT},
-	{"led6",  LED3_REG, 0},
-	{"led7",  LED3_REG, LED_B_SHIFT},
-	{"led8",  LED4_REG, 0},
-	{"led9",  LED4_REG, LED_B_SHIFT},
-	{"led10", LED5_REG, 0},
-	{"led11", LED5_REG, LED_B_SHIFT},
-	{"led12", LED6_REG, 0},
-	{"led13", LED6_REG, LED_B_SHIFT},
-	{"led14", LED7_REG, 0},
-	{"led15", LED7_REG, LED_B_SHIFT},
-	{"led16", LED8_REG, 0},
-	{"led17", LED8_REG, LED_B_SHIFT},
+	{LED0_REG, 0},
+	{LED0_REG, LED_B_SHIFT},
+	{LED1_REG, 0},
+	{LED1_REG, LED_B_SHIFT},
+	{LED2_REG, 0},
+	{LED2_REG, LED_B_SHIFT},
+	{LED3_REG, 0},
+	{LED3_REG, LED_B_SHIFT},
+	{LED4_REG, 0},
+	{LED4_REG, LED_B_SHIFT},
+	{LED5_REG, 0},
+	{LED5_REG, LED_B_SHIFT},
+	{LED6_REG, 0},
+	{LED6_REG, LED_B_SHIFT},
+	{LED7_REG, 0},
+	{LED7_REG, LED_B_SHIFT},
+	{LED8_REG, 0},
+	{LED8_REG, LED_B_SHIFT},
 };
 
 #define LED_DEFAULT_BLINK_PERIOD_MS 500
@@ -411,63 +411,78 @@ static int led_set_blocking(struct led_classdev *cdev, enum led_brightness brigh
 
 static int led_register(struct vmcu* vmcu)
 {
-	const char **names = NULL;
+	struct fwnode_handle *leds = device_get_named_child_node(&vmcu->client->dev, "leds");
+	if (leds == NULL)
+		return 0;
+
 	int r = 0;
-	/* Check if led names are defined in DT */
-	int count = device_property_string_array_count(&vmcu->client->dev, "led-names");
-	if (count > 0) {
-		names = kcalloc(count, sizeof(*names), GFP_KERNEL);
-		if (names == NULL)
-			return -ENOMEM;
 
-		r = device_property_read_string_array(&vmcu->client->dev, "led-names",
-												names, count);
-		if (r < 0)
-			dev_warn(&vmcu->client->dev, "failed reading \"led-names\": %d\n", r);
-	}
+	fwnode_for_each_child_node_scoped(leds, child) {
+		/* Get LED index between 0 and LED_NUM */
+		uint32_t reg = 0;
+		r = fwnode_property_read_u32(child, "reg", &reg);
+		if (r != 0) {
+			dev_warn(&vmcu->client->dev, "Node %s missing \"reg\" property\n", fwnode_get_name(child));
+			continue;
+		}
+		if (reg > LED_NUM) {
+			dev_warn(&vmcu->client->dev, "Node %s invalid \"reg\" property\n", fwnode_get_name(child));
+			continue;
+		}
 
-	for (size_t i = 0; i < ARRAY_SIZE(vmcu_leds); ++i) {
+		/* Register led */
 		struct led_init_data init_data = {};
-
-		/* Disable led if active across reboot cycle.
-		*  vmcu will disable led when powered off but can't
-		*  detect reboot. */
-		r = regmap_update_bits(vmcu->regmap, vmcu_leds[i].reg,
-				(LED_GREEN_MASK | LED_RED_MASK | LED_BLINK_MASK) << vmcu_leds[i].shift, 0);
-		if (r)
-			dev_err(&vmcu->client->dev, "Failed disabling %s: %d\n", vmcu_leds[i].label, r);
-
-		const size_t ired = i * 2;
-		const size_t igreen = ired + 1;
+		const size_t ired = reg * 2;
+		const size_t igreen = (reg * 2) + 1;
 		vmcu->led_subled[ired].color_index = LED_COLOR_ID_RED;
-		vmcu->led_subled[ired].channel = i;
+		vmcu->led_subled[ired].channel = reg;
 		vmcu->led_subled[ired].brightness = 0;
 		vmcu->led_subled[igreen].color_index = LED_COLOR_ID_GREEN;
-		vmcu->led_subled[igreen].channel = i;
+		vmcu->led_subled[igreen].channel = reg;
 		vmcu->led_subled[igreen].brightness = 0;
-		vmcu->led[i].subled_info = &vmcu->led_subled[ired];
-		vmcu->led[i].num_colors = LED_NUM_COLORS;
-		init_data.devicename = "vmcu";
-		init_data.devname_mandatory = 1;
-		/* Use DT provided name if available */
-		init_data.default_label = count >= i && names[i][0] ? names[i] : vmcu_leds[i].label;
-		vmcu->led[i].led_cdev.max_brightness = 1;
-		vmcu->led[i].led_cdev.brightness_set_blocking = led_set_blocking;
-		vmcu->led[i].led_cdev.blink_set = led_blink;
 
-		r = devm_led_classdev_multicolor_register_ext(&vmcu->client->dev, &vmcu->led[i], &init_data);
+		/* Allow setting a default intensity level for individual colors.
+		 * Intensity refers to which colors are enabled and brightness
+		 * is used for controlling... brightness */
+		uint32_t intensity = 0;
+		r = fwnode_property_read_u32(child, "ake,default-intensity", &intensity);
+		if (r == 0) {
+			switch (intensity) {
+			case LED_COLOR_ID_RED:
+				vmcu->led_subled[ired].intensity = 1;
+				break;
+			case LED_COLOR_ID_GREEN:
+				vmcu->led_subled[igreen].intensity = 1;
+				break;
+			case LED_COLOR_ID_YELLOW:
+				vmcu->led_subled[ired].intensity = 1;
+				vmcu->led_subled[igreen].intensity = 1;
+				break;
+			default:
+				dev_warn(&vmcu->client->dev, "Node %s invalid \"ake,default-intensity\" value: %u",
+						fwnode_get_name(child), intensity);
+				break;
+			}
+		}
+
+		vmcu->led[reg].subled_info = &vmcu->led_subled[ired];
+		vmcu->led[reg].num_colors = LED_NUM_COLORS;
+		init_data.fwnode = child;
+		init_data.devicename = "vmcu";
+		init_data.devname_mandatory = 0;
+		/* Use DT provided name if available */
+		vmcu->led[reg].led_cdev.max_brightness = 1;
+		vmcu->led[reg].led_cdev.brightness_set_blocking = led_set_blocking;
+		vmcu->led[reg].led_cdev.blink_set = led_blink;
+
+		r = devm_led_classdev_multicolor_register_ext(&vmcu->client->dev, &vmcu->led[reg], &init_data);
 		if (r < 0) {
-			dev_err(&vmcu->client->dev, "Failed registering %s\n", vmcu_leds[i].label);
-			goto exit;
+			dev_err(&vmcu->client->dev, "Failed registering %s\n", fwnode_get_name(child));
+			return r;
 		}
 	}
 
-	r = 0;
-
-exit:
-	if (names != NULL)
-		kfree(names);
-	return r;
+	return 0;
 }
 
 static int iio_read_raw(struct iio_dev *indio_dev, struct iio_chan_spec const *chan, int *val, int *val2, long info)
