@@ -228,6 +228,13 @@ struct vmcu_version {
 	u8 patch;
 };
 
+static int is_version_ge(const struct vmcu_version* v, u8 major, u8 minor, u8 patch)
+{
+	const uint32_t lhs = (v->major << 16) | (v->minor << 8) | (v->patch);
+	const uint32_t rhs = (major << 16) | (minor << 8) | (patch);
+	return lhs >= rhs;
+}
+
 struct vmcu {
 	struct mutex			mtx;
 	struct regmap			*regmap;
@@ -423,6 +430,10 @@ static int led_register(struct vmcu* vmcu)
 
 	int r = 0;
 
+	/* version before 1.3.0 had a single led register */
+	const uint32_t max_reg = is_version_ge(&vmcu->version, 1, 3, 0) ?
+								LED_NUM : 1;
+
 	fwnode_for_each_child_node_scoped(leds, child) {
 		/* Get LED index between 0 and LED_NUM */
 		uint32_t reg = 0;
@@ -431,7 +442,7 @@ static int led_register(struct vmcu* vmcu)
 			dev_warn(&vmcu->client->dev, "Node %s missing \"reg\" property\n", fwnode_get_name(child));
 			continue;
 		}
-		if (reg > LED_NUM) {
+		if (reg > max_reg) {
 			dev_warn(&vmcu->client->dev, "Node %s invalid \"reg\" property\n", fwnode_get_name(child));
 			continue;
 		}
@@ -731,7 +742,9 @@ static int adc_register(struct vmcu *vmcu)
 	indio_dev->info = &vmcu_iio_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = vmcu_iio_channels;
-	indio_dev->num_channels = ARRAY_SIZE(vmcu_iio_channels);
+	/* dacn registers were added in version 1.3.0 */
+	indio_dev->num_channels = is_version_ge(&vmcu->version, 1, 3, 0)
+								? VMCU_CH_SIZE : VMCU_CH_DAC0;
 
 	r = devm_iio_device_register(&vmcu->client->dev, indio_dev);
 	if (r < 0) {
