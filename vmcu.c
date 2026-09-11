@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021  Data Respons Solutions AB
+ * Copyright (c) 2026 Akkodis Edge
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -2098,8 +2098,10 @@ static void vmcu_remove(struct i2c_client* client)
 	root_device_unregister(vmcu->root_dev);
 }
 
-static const struct of_device_id of_vmcu_match[] = { { .compatible =
-	"drs,vmcu" }, { /* Sentinel */} };
+static const struct of_device_id of_vmcu_match[] = {
+		{ .compatible = "drs,vmcu" },
+		{ .compatible = "ake,vmcu" },
+		{ /* Sentinel */} };
 
 static struct i2c_device_id vmcu_id[] = { { "vmcu", 0 }, { } };
 MODULE_DEVICE_TABLE(i2c, vmcu_id);
@@ -2117,7 +2119,7 @@ static struct i2c_driver vmcu_driver = {
 };
 module_i2c_driver(vmcu_driver);
 
-MODULE_AUTHOR("Mikko Salomäki <ms@datarespons.se>");
+MODULE_AUTHOR("Mikko Salomaki <mikko.salomaki@akkodis.com>");
 MODULE_DESCRIPTION("Vehicle MCU driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("1.9");
+MODULE_VERSION("1.10");
